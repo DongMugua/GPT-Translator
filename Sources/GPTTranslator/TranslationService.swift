@@ -42,25 +42,15 @@ struct AntigravityCLIService: Sendable {
                 executable: executableURL
             )
         } catch {
-            // Some installations need the desktop app to refresh its Google
-            // session before agy can complete a turn. Reopen it in the
-            // background, allow a short initialization window, then retry.
-            wakeAntigravityDesktopApp()
+            // Retry the lightweight CLI session once without opening the full
+            // Antigravity desktop app. The desktop app creates optional audio
+            // helper processes that a translation-only utility does not need.
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             _ = try? await AntigravityStreamClient.shared.translate(
                 prompt: prompt,
                 executable: executableURL
             )
         }
-    }
-
-    private func wakeAntigravityDesktopApp() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-g", "-j", "-b", "com.google.antigravity"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
     }
 
     func translate(text: String, source: LanguageOption, target: LanguageOption) async throws -> String {
