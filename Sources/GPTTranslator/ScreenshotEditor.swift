@@ -1203,7 +1203,7 @@ struct ScreenshotCanvasRepresentable: NSViewRepresentable {
 }
 
 struct CompactScreenshotEditorView: View {
-    @StateObject private var model: ScreenshotEditorModel
+    @ObservedObject var model: ScreenshotEditorModel
     @State private var showingOCR = false
     @State private var showingColorPalette = false
 
@@ -1216,7 +1216,7 @@ struct CompactScreenshotEditorView: View {
     let onPin: (CGImage) -> Void
 
     init(
-        image: CGImage,
+        model: ScreenshotEditorModel,
         displaySize: NSSize,
         panelWidth: CGFloat,
         toolbarBelow: Bool,
@@ -1225,7 +1225,7 @@ struct CompactScreenshotEditorView: View {
         onOCRTranslate: @escaping (CGImage) -> Void,
         onPin: @escaping (CGImage) -> Void
     ) {
-        _model = StateObject(wrappedValue: ScreenshotEditorModel(image: image))
+        self.model = model
         self.displaySize = displaySize
         self.panelWidth = panelWidth
         self.toolbarBelow = toolbarBelow
@@ -1344,7 +1344,7 @@ struct CompactScreenshotEditorView: View {
                     onCancel()
                 }
 
-                compactButton("checkmark", help: "完成并复制") {
+                compactButton("checkmark", help: "完成并复制（⌘C）") {
                     copyScreenshotAndClose()
                 }
             }
@@ -1553,20 +1553,24 @@ struct CompactScreenshotEditorView: View {
 
 struct PinnedScreenshotView: View {
     let image: CGImage
-    let onFocus: () -> Void
     let onClose: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        Image(nsImage: NSImage(
-            cgImage: image,
-            size: NSSize(width: image.width, height: image.height)
-        ))
-        .resizable()
-        .scaledToFit()
-        .overlay {
-            Rectangle()
-                .stroke(Color.black.opacity(0.22), lineWidth: 1)
+        ZStack {
+            Image(nsImage: NSImage(
+                cgImage: image,
+                size: NSSize(width: image.width, height: image.height)
+            ))
+            .resizable()
+            .scaledToFit()
+            .overlay {
+                Rectangle()
+                    .stroke(Color.black.opacity(0.22), lineWidth: 1)
+            }
+
+            PinnedScreenshotDragSurface()
+                .accessibilityHidden(true)
         }
         .overlay(alignment: .topTrailing) {
             if hovering {
@@ -1583,7 +1587,22 @@ struct PinnedScreenshotView: View {
         }
         .onHover { hovering = $0 }
         .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture().onEnded(onFocus))
+    }
+}
+
+private struct PinnedScreenshotDragSurface: NSViewRepresentable {
+    func makeNSView(context: Context) -> PinnedScreenshotDragView {
+        PinnedScreenshotDragView()
+    }
+
+    func updateNSView(_ view: PinnedScreenshotDragView, context: Context) {}
+}
+
+private final class PinnedScreenshotDragView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        window.makeKeyAndOrderFront(nil)
+        window.performDrag(with: event)
     }
 }
 
@@ -1854,9 +1873,32 @@ struct ScreenshotEditorView: View {
 
 final class ScreenshotEditorPanel: NSPanel {
     var closeHandler: (() -> Void)?
+    var copyScreenshotHandler: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    func copyScreenshotIfTextIsNotFocused() -> Bool {
+        guard !(firstResponder is NSTextView),
+              !(firstResponder is NSTextField),
+              let copyScreenshotHandler else { return false }
+        copyScreenshotHandler()
+        return true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isCommandC = modifiers.contains(.command)
+            && !modifiers.contains(.option)
+            && !modifiers.contains(.control)
+            && !modifiers.contains(.shift)
+            && event.charactersIgnoringModifiers?.lowercased() == "c"
+
+        if isCommandC, copyScreenshotIfTextIsNotFocused() {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func performClose(_ sender: Any?) {
         closeHandler?()
@@ -1865,8 +1907,29 @@ final class ScreenshotEditorPanel: NSPanel {
 
 final class PinnedScreenshotPanel: NSPanel {
     var escapeHandler: (() -> Void)?
+    var copyScreenshotHandler: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
+
+    func copyScreenshot() -> Bool {
+        guard let copyScreenshotHandler else { return false }
+        copyScreenshotHandler()
+        return true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isCommandC = modifiers.contains(.command)
+            && !modifiers.contains(.option)
+            && !modifiers.contains(.control)
+            && !modifiers.contains(.shift)
+            && event.charactersIgnoringModifiers?.lowercased() == "c"
+
+        if isCommandC, copyScreenshot() {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == UInt16(kVK_Escape) {

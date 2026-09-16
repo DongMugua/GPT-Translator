@@ -147,6 +147,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var selectionStatusWindow: NSPanel?
     private var selectionStatusDismissWorkItem: DispatchWorkItem?
     private var pinnedScreenshotWindows: [PinnedScreenshotPanel] = []
+    private var hasScreenshotWindowForKeyboard: Bool {
+        screenshotEditorWindow != nil || !pinnedScreenshotWindows.isEmpty
+    }
     private var quickInputWindow: QuickTranslationPanel?
     private var resultWindowAnchor: NSPoint?
     private var resultSizingSubscription: AnyCancellable?
@@ -785,7 +788,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         Task { @MainActor in
             defer {
                 isCapturing = false
-                if screenshotEditorWindow != nil { installScreenshotEditorEscapeMonitors() }
+                if hasScreenshotWindowForKeyboard { installScreenshotEditorEscapeMonitors() }
             }
             // Keep existing screenshot windows visible so they can be included
             // in the new screen capture, while the new overlay owns key events.
@@ -817,7 +820,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         Task { @MainActor in
             defer {
                 isCapturing = false
-                if screenshotEditorWindow != nil { installScreenshotEditorEscapeMonitors() }
+                if hasScreenshotWindowForKeyboard { installScreenshotEditorEscapeMonitors() }
             }
             await Task.yield()
             guard let displayImage = currentDisplayImage() else { return }
@@ -837,7 +840,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         Task { @MainActor in
             defer {
                 isCapturing = false
-                if screenshotEditorWindow != nil { installScreenshotEditorEscapeMonitors() }
+                if hasScreenshotWindowForKeyboard { installScreenshotEditorEscapeMonitors() }
             }
             await Task.yield()
             guard let displayImage = currentDisplayImage() else { return }
@@ -900,6 +903,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             ? selection.screenRect.minY - toolAreaHeight
             : min(selection.screenRect.minY, visible.maxY - panelHeight - 8)
 
+        let editorModel = ScreenshotEditorModel(image: selection.image)
         let panel = ScreenshotEditorPanel(
             contentRect: NSRect(x: originX, y: originY, width: panelWidth, height: panelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -917,9 +921,17 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             guard let panel else { return }
             self?.closeScreenshotEditor(panel)
         }
+        panel.copyScreenshotHandler = { [weak self, weak editorModel] in
+            guard let self,
+                  let image = editorModel?.renderedImage(),
+                  let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setData(data, forType: .png)
+            self.closeAllScreenshotEditors()
+        }
         panel.contentView = NSHostingView(
             rootView: CompactScreenshotEditorView(
-                image: selection.image,
+                model: editorModel,
                 displaySize: NSSize(width: imageDisplayWidth, height: imageDisplayHeight),
                 panelWidth: panelWidth,
                 toolbarBelow: toolbarBelow,
@@ -1018,18 +1030,19 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .floating
-        panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.escapeHandler = { [weak self, weak panel] in
             guard let self, let panel else { return }
             self.closePinnedScreenshot(panel)
         }
+        panel.copyScreenshotHandler = {
+            guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setData(data, forType: .png)
+        }
         panel.contentView = NSHostingView(
             rootView: PinnedScreenshotView(
                 image: image,
-                onFocus: { [weak panel] in
-                    panel?.makeKeyAndOrderFront(nil)
-                },
                 onClose: { [weak self, weak panel] in
                     guard let self, let panel else { return }
                     self.closePinnedScreenshot(panel)
@@ -1038,11 +1051,18 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         )
         pinnedScreenshotWindows.append(panel)
         panel.orderFrontRegardless()
+        installScreenshotEditorEscapeMonitors()
     }
 
     private func closePinnedScreenshot(_ panel: PinnedScreenshotPanel) {
         panel.orderOut(nil)
         pinnedScreenshotWindows.removeAll { $0 === panel }
+        guard !isCapturing else { return }
+        if hasScreenshotWindowForKeyboard {
+            installScreenshotEditorEscapeMonitors()
+        } else {
+            removeScreenshotEscapeMonitors()
+        }
     }
 
     func closeScreenshotEditor(_ panel: ScreenshotEditorPanel? = nil) {
@@ -1053,7 +1073,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         screenshotTranslationWindow?.orderOut(nil)
         screenshotTranslationWindow = nil
         removeScreenshotEscapeMonitors()
-        if screenshotEditorWindow != nil, !isCapturing {
+        if hasScreenshotWindowForKeyboard, !isCapturing {
             installScreenshotEditorEscapeMonitors()
         }
     }
@@ -1065,12 +1085,30 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         screenshotTranslationWindow?.orderOut(nil)
         screenshotTranslationWindow = nil
         removeScreenshotEscapeMonitors()
+        if !pinnedScreenshotWindows.isEmpty, !isCapturing {
+            installScreenshotEditorEscapeMonitors()
+        }
     }
 
     private func installScreenshotEditorEscapeMonitors() {
         removeScreenshotEscapeMonitors()
         screenshotKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if Self.isScreenshotCopyShortcut(event),
+               let panel = self?.pinnedScreenshotWindows.reversed().first(where: \.isKeyWindow),
+               panel.copyScreenshot() {
+                return nil
+            }
+            if Self.isScreenshotCopyShortcut(event),
+               let panel = self?.screenshotEditorWindows.first(where: \.isKeyWindow),
+               panel.copyScreenshotIfTextIsNotFocused() {
+                return nil
+            }
+
             guard event.keyCode == UInt16(kVK_Escape) else { return event }
+            if let panel = self?.pinnedScreenshotWindows.reversed().first(where: \.isKeyWindow) {
+                panel.escapeHandler?()
+                return nil
+            }
             if self?.screenshotEditorWindow?.firstResponder is NSTextView {
                 return event
             }
@@ -1078,11 +1116,34 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             return nil
         }
         screenshotGlobalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if Self.isScreenshotCopyShortcut(event) {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    guard let self else { return }
+                    if let pinnedPanel = self.pinnedScreenshotWindows.reversed().first(where: \.isVisible) {
+                        _ = pinnedPanel.copyScreenshot()
+                        return
+                    }
+                    guard let panel = self.screenshotEditorWindow,
+                          panel.isVisible else { return }
+                    _ = panel.copyScreenshotIfTextIsNotFocused()
+                }
+                return
+            }
             guard event.keyCode == UInt16(kVK_Escape) else { return }
             Task { @MainActor [weak self] in
                 self?.closeScreenshotEditor()
             }
         }
+    }
+
+    private static func isScreenshotCopyShortcut(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return modifiers.contains(.command)
+            && !modifiers.contains(.option)
+            && !modifiers.contains(.control)
+            && !modifiers.contains(.shift)
+            && event.charactersIgnoringModifiers?.lowercased() == "c"
     }
 
     private func removeScreenshotEscapeMonitors() {
