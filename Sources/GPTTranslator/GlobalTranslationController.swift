@@ -1204,12 +1204,23 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.dismissUnpinnedResultIfNeeded(at: NSEvent.mouseLocation)
-                self?.handleSelectionMouseUp()
+                guard let self else { return }
+                let location = NSEvent.mouseLocation
+                // A click that opens another app's menu must not be treated as
+                // the end of a text selection. In the fallback path below we
+                // synthesize Command-C, which would otherwise close the menu
+                // immediately after it appears.
+                guard !self.isMenuBarLocation(location), !self.isMenuInteractionActive() else { return }
+                self.dismissUnpinnedResultIfNeeded(at: location)
+                self.handleSelectionMouseUp()
             }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            self?.dismissUnpinnedResultIfNeeded(at: NSEvent.mouseLocation)
+            guard let self else { return event }
+            let location = NSEvent.mouseLocation
+            if !self.isMenuBarLocation(location), !self.isMenuInteractionActive() {
+                self.dismissUnpinnedResultIfNeeded(at: location)
+            }
             return event
         }
         logger.info("hotkeys installed translate=\(self.translateHotKey != nil, privacy: .public) screenshot=\(self.screenshotHotKey != nil, privacy: .public) mouse=\(self.mouseMonitor != nil, privacy: .public)")
@@ -1270,7 +1281,12 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
 
     private func handleSelectionMouseUp() {
-        guard selectionEnabled, !NSApp.isActive, (showSelectionButton || autoTranslateSelection) else { return }
+        let location = NSEvent.mouseLocation
+        guard selectionEnabled,
+              !NSApp.isActive,
+              (showSelectionButton || autoTranslateSelection),
+              !isMenuBarLocation(location),
+              !isMenuInteractionActive() else { return }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" else {
             hideFloatingButton()
             return
@@ -1282,6 +1298,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             guard let self,
                   self.selectionEnabled,
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder",
+                  !self.isMenuBarLocation(NSEvent.mouseLocation),
+                  !self.isMenuInteractionActive(),
                   let text = await self.selectedTextWithClipboardFallback(),
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             guard self.viewModel?.shouldTranslateFloatingText(text) != false else {
@@ -1295,6 +1313,55 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 self.showFloatingButton(for: text, at: NSEvent.mouseLocation)
             }
         }
+    }
+
+    private func isMenuBarLocation(_ location: NSPoint) -> Bool {
+        NSScreen.screens.contains { screen in
+            let frame = screen.frame
+            return location.x >= frame.minX
+                && location.x <= frame.maxX
+                && location.y >= frame.maxY - 30
+                && location.y <= frame.maxY + 4
+        }
+    }
+
+    private func isMenuInteractionActive() -> Bool {
+        guard let focused = focusedUIElement() else { return false }
+        let menuRoles: Set<String> = [
+            "AXMenu",
+            "AXMenuBar",
+            "AXMenuBarItem",
+            "AXMenuButton",
+            "AXMenuItem"
+        ]
+        var element: AXUIElement? = focused
+        for _ in 0..<8 {
+            guard let current = element else { break }
+            if let role = accessibilityStringAttribute(kAXRoleAttribute as CFString, from: current),
+               menuRoles.contains(role) {
+                return true
+            }
+            if let subrole = accessibilityStringAttribute(kAXSubroleAttribute as CFString, from: current),
+               menuRoles.contains(subrole) {
+                return true
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                current,
+                kAXParentAttribute as CFString,
+                &parent
+            ) == .success,
+            let parent,
+            CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            element = unsafeDowncast(parent, to: AXUIElement.self)
+        }
+        return false
+    }
+
+    private func accessibilityStringAttribute(_ attribute: CFString, from element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+        return value as? String
     }
 
     private func showFloatingButton(for text: String, at location: NSPoint) {
