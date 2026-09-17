@@ -38,6 +38,7 @@ struct MenuBarView: View {
     @EnvironmentObject private var viewModel: TranslationViewModel
     @EnvironmentObject private var globalController: GlobalTranslationController
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismissMenu
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -121,7 +122,9 @@ struct MenuBarView: View {
             .help("关闭后，划词和截图识别到中文时不调用翻译接口")
 
             Button {
-                globalController.captureScreenshot()
+                runAfterMenuDismissal {
+                    globalController.captureScreenshot()
+                }
             } label: {
                 HStack(spacing: 6) {
                     MenuCaptureIcon(kind: .capture)
@@ -136,7 +139,9 @@ struct MenuBarView: View {
             .buttonStyle(.plain)
 
             Button {
-                globalController.translateScreenshot()
+                runAfterMenuDismissal {
+                    globalController.translateScreenshot()
+                }
             } label: {
                 HStack(spacing: 6) {
                     MenuCaptureIcon(kind: .translation)
@@ -151,7 +156,9 @@ struct MenuBarView: View {
             .buttonStyle(.plain)
 
             Button {
-                globalController.recognizeScreenshot()
+                runAfterMenuDismissal {
+                    globalController.recognizeScreenshot()
+                }
             } label: {
                 HStack(spacing: 6) {
                     MenuCaptureIcon(kind: .ocr)
@@ -166,7 +173,9 @@ struct MenuBarView: View {
             .buttonStyle(.plain)
 
             Button {
-                globalController.toggleQuickTranslationInput()
+                runAfterMenuDismissal {
+                    globalController.toggleQuickTranslationInput()
+                }
             } label: {
                 HStack(spacing: 6) {
                     MenuCaptureIcon(kind: .quickInput)
@@ -264,6 +273,15 @@ struct MenuBarView: View {
 
     private func showSettings() {
         globalController.showSettingsWindow()
+    }
+
+    private func runAfterMenuDismissal(_ action: @escaping @MainActor () -> Void) {
+        dismissMenu()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            guard !Task.isCancelled else { return }
+            action()
+        }
     }
 
     private func statusColor(for state: ProviderConnectionState) -> Color {

@@ -164,6 +164,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var quickInputTargetElement: AXUIElement?
     private var quickInputTargetPID: pid_t?
     private var quickInputTranslationTask: Task<Void, Never>?
+    private var selectionMouseDownLocation: NSPoint?
 
     private static let hotKeySignature: OSType = 0x4750_5452 // GPTR
     private static let translateHotKeyID: UInt32 = 1
@@ -257,6 +258,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         hotKeyHandler = nil
         mouseMonitor = nil
         localMouseMonitor = nil
+        selectionMouseDownLocation = nil
         screenshotKeyMonitor = nil
         screenshotGlobalKeyMonitor = nil
         hideFloatingButton()
@@ -1202,23 +1204,32 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
         registerHotKeys()
 
-        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
+            let eventType = event.type
+            let location = NSEvent.mouseLocation
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let location = NSEvent.mouseLocation
+                if eventType == .leftMouseDown {
+                    self.selectionMouseDownLocation = location
+                    return
+                }
+                let didDrag = self.selectionMouseDownLocation.map {
+                    hypot(location.x - $0.x, location.y - $0.y) >= 4
+                } ?? false
+                self.selectionMouseDownLocation = nil
                 // A click that opens another app's menu must not be treated as
                 // the end of a text selection. In the fallback path below we
                 // synthesize Command-C, which would otherwise close the menu
                 // immediately after it appears.
-                guard !self.isMenuBarLocation(location), !self.isMenuInteractionActive() else { return }
+                guard !self.isMenuBarLocation(location), !self.isSelectionExcludedInteractionActive() else { return }
                 self.dismissUnpinnedResultIfNeeded(at: location)
-                self.handleSelectionMouseUp()
+                self.handleSelectionMouseUp(allowClipboardFallback: didDrag)
             }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self else { return event }
             let location = NSEvent.mouseLocation
-            if !self.isMenuBarLocation(location), !self.isMenuInteractionActive() {
+            if !self.isMenuBarLocation(location), !self.isSelectionExcludedInteractionActive() {
                 self.dismissUnpinnedResultIfNeeded(at: location)
             }
             return event
@@ -1280,13 +1291,13 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         }
     }
 
-    private func handleSelectionMouseUp() {
+    private func handleSelectionMouseUp(allowClipboardFallback: Bool) {
         let location = NSEvent.mouseLocation
         guard selectionEnabled,
               !NSApp.isActive,
               (showSelectionButton || autoTranslateSelection),
               !isMenuBarLocation(location),
-              !isMenuInteractionActive() else { return }
+              !isSelectionExcludedInteractionActive() else { return }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" else {
             hideFloatingButton()
             return
@@ -1299,8 +1310,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                   self.selectionEnabled,
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder",
                   !self.isMenuBarLocation(NSEvent.mouseLocation),
-                  !self.isMenuInteractionActive(),
-                  let text = await self.selectedTextWithClipboardFallback(),
+                  !self.isSelectionExcludedInteractionActive(),
+                  let text = await self.selectedTextWithClipboardFallback(allowClipboardFallback: allowClipboardFallback),
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             guard self.viewModel?.shouldTranslateFloatingText(text) != false else {
                 self.hideFloatingButton()
@@ -1325,24 +1336,36 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         }
     }
 
-    private func isMenuInteractionActive() -> Bool {
-        guard let focused = focusedUIElement() else { return false }
-        let menuRoles: Set<String> = [
+    private func isSelectionExcludedInteractionActive() -> Bool {
+        let excludedRoles: Set<String> = [
+            "AXButton",
+            "AXCheckBox",
+            "AXComboBox",
+            "AXDisclosureTriangle",
+            "AXIncrementor",
+            "AXLink",
             "AXMenu",
             "AXMenuBar",
             "AXMenuBarItem",
             "AXMenuButton",
-            "AXMenuItem"
+            "AXMenuItem",
+            "AXPopUpButton",
+            "AXRadioButton",
+            "AXScrollBar",
+            "AXSlider",
+            "AXTab",
+            "AXToolbar"
         ]
+        guard let focused = focusedUIElement() else { return false }
         var element: AXUIElement? = focused
         for _ in 0..<8 {
             guard let current = element else { break }
             if let role = accessibilityStringAttribute(kAXRoleAttribute as CFString, from: current),
-               menuRoles.contains(role) {
+               excludedRoles.contains(role) {
                 return true
             }
             if let subrole = accessibilityStringAttribute(kAXSubroleAttribute as CFString, from: current),
-               menuRoles.contains(subrole) {
+               excludedRoles.contains(subrole) {
                 return true
             }
             var parent: CFTypeRef?
@@ -1562,11 +1585,12 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         return selected
     }
 
-    private func selectedTextWithClipboardFallback() async -> String? {
+    private func selectedTextWithClipboardFallback(allowClipboardFallback: Bool = true) async -> String? {
         if let text = selectedText(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text
         }
-        guard accessibilityTrusted,
+        guard allowClipboardFallback,
+              accessibilityTrusted,
               let application = NSWorkspace.shared.frontmostApplication,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
 
