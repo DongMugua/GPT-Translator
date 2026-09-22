@@ -63,6 +63,17 @@ struct AntigravityCLIService: Sendable {
                 executable: executableURL
             )
         } catch let serviceError as ServiceError {
+            // A long-lived agy process can keep an expired or partially initialized
+            // session after the user has successfully logged in again. In that case
+            // the stream reports an auth error even though a fresh one-shot process
+            // can use the current OAuth session. The stream is reset by its error
+            // handler before this retry is started.
+            if shouldRetryWithOneShot(serviceError) {
+                return try await translateOneShot(
+                    executable: executableURL,
+                    prompt: prompt
+                )
+            }
             throw normalizedServiceError(serviceError)
         } catch {
             // Keep a one-shot fallback for older or damaged agy installations. A normal
@@ -72,6 +83,24 @@ struct AntigravityCLIService: Sendable {
                 prompt: prompt
             )
         }
+    }
+
+    private func shouldRetryWithOneShot(_ error: ServiceError) -> Bool {
+        guard case .processFailed(let raw) = error else { return false }
+        return isAuthenticationFailure(raw)
+    }
+
+    private func isAuthenticationFailure(_ raw: String) -> Bool {
+        let message = raw.lowercased()
+        return message.contains("auth")
+            || message.contains("login")
+            || message.contains("oauth")
+            || message.contains("unauthorized")
+            || message.contains("not logged")
+            || message.contains("session expired")
+            || message.contains("session invalid")
+            || message.contains("401")
+            || message.contains("403")
     }
 
     private func translationPrompt(text: String, source: LanguageOption, target: LanguageOption) -> String {
@@ -108,7 +137,7 @@ struct AntigravityCLIService: Sendable {
         if raw.localizedCaseInsensitiveContains("location is not supported") {
             return .processFailed("Google OAuth 已登录，但当前网络地区不支持 Antigravity API。请切换到受支持的网络地区后重试。")
         }
-        if raw.localizedCaseInsensitiveContains("auth") || raw.localizedCaseInsensitiveContains("login") {
+        if isAuthenticationFailure(raw) {
             return .processFailed("尚未完成 Google OAuth 登录，请先在终端运行 agy 完成登录。")
         }
         return error
@@ -178,7 +207,12 @@ private final class AntigravityStreamClient: @unchecked Sendable {
                     let result = try translateSynchronously(prompt: prompt, executable: executable)
                     continuation.resume(returning: result)
                 } catch {
-                    if error is ClientError { stop() }
+                    // A provider-level error can leave the persistent CLI in a
+                    // bad session state. Drop it before the caller decides whether
+                    // to retry with a fresh one-shot process.
+                    if error is ClientError || error is AntigravityCLIService.ServiceError {
+                        stop()
+                    }
                     continuation.resume(throwing: error)
                 }
             }
