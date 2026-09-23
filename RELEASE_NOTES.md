@@ -1,16 +1,16 @@
-# GPT 翻译助手 1.2.4
+# GPT 翻译助手 1.2.5
 
-1.2.4 修复 Gemini OAuth 常驻 CLI 会话失效后，应用误报未登录的问题。
+1.2.5 将 OpenAI/ChatGPT OAuth 翻译源的默认模型切换到 GPT-6 Luna。
 
 ## 本次更新
 
-- 修复 `agy` 常驻进程遇到登录会话失效后持续复用旧会话的问题。
-- 认证/会话类错误会自动重启常驻进程，并使用一次性请求重试。
-- 地区不支持、配额限制等真实错误不会被误判为登录失败。
+- OpenAI/ChatGPT OAuth 源默认使用 `gpt-6-luna`，继续复用本机 `codex login` 的登录会话。
+- 已保存的默认模型或 `gpt-5.6-luna` 会自动迁移到 `gpt-6-luna`；其他自选模型保持原设置。
+- 模型设置中可选择 GPT-6 Luna、Sol 和 Astra。
 
 ## 安装
 
-下载 `GPT-Translator-1.2.4-macOS.dmg`，打开后将“GPT 翻译助手”拖入 Applications。
+下载 `GPT-Translator-1.2.5-macOS.dmg`，打开后将“GPT 翻译助手”拖入 Applications。
 
 当前构建未经过 Apple Developer ID 公证。若 macOS 阻止首次打开，请在 Finder 中右键应用并选择“打开”。Apple 离线翻译需要 macOS 15 或更高版本；其他翻译源仍支持 macOS 13 或更高版本。
 

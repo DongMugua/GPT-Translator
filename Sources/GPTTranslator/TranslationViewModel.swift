@@ -178,12 +178,11 @@ final class TranslationViewModel: ObservableObject {
         self.selectedCustomAPIID = initialCustom.id
         self.customAPIDisplayName = initialCustom.displayName
         self.customAPIEndpoint = initialCustom.endpoint
-        let storedModel = UserDefaults.standard.string(forKey: Self.modelKey(for: storedProvider))
-            ?? (storedProvider == .openAIChatGPT ? UserDefaults.standard.string(forKey: "modelName") : nil)
+        let storedModel = Self.savedModel(for: storedProvider)
         let obsoleteModels = ["gpt-4.1-mini", "deepseek-chat", "deepseek-reasoner"]
         self.modelName = storedProvider == .customAPI
             ? initialCustom.model
-            : (storedModel.map(obsoleteModels.contains) == true ? storedProvider.defaultModel : (storedModel ?? storedProvider.defaultModel))
+            : (obsoleteModels.contains(storedModel) ? storedProvider.defaultModel : storedModel)
         self.reasoningEffort = UserDefaults.standard.string(forKey: "reasoningEffort")
             .flatMap(ReasoningEffort.init(rawValue:)) ?? .medium
         if storedProvider == .customAPI {
@@ -205,6 +204,9 @@ final class TranslationViewModel: ObservableObject {
         let allIDs = ModelProvider.allCases.filter { $0 != .customAPI }.map(\.rawValue)
             + initialCustomSources.map { Self.customSourceID($0.id) }
         self.floatingSourceOrder = Self.normalizedSourceOrder(savedOrder, allIDs: allIDs)
+        // Migrate the OpenAI model even when another provider is currently selected,
+        // so switching to OpenAI later uses the new default immediately.
+        _ = Self.savedModel(for: .openAIChatGPT)
         if decodedCustomSources.isEmpty, let legacyKey = keychain.readAPIKey(for: .customAPI), !legacyKey.isEmpty {
             _ = keychain.saveAPIKey(legacyKey, account: initialCustom.keychainAccount)
         }
@@ -216,7 +218,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     var currentAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.4"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.5"
     }
 
     func checkForUpdates(force: Bool = false) async {
@@ -346,7 +348,7 @@ final class TranslationViewModel: ObservableObject {
             modelName = config.model
             apiKey = keychain.readAPIKey(account: config.keychainAccount) ?? ""
         } else {
-            modelName = UserDefaults.standard.string(forKey: modelKey(for: newProvider)) ?? newProvider.defaultModel
+            modelName = Self.savedModel(for: newProvider)
             apiKey = newProvider.needsAPIKey
                 ? (keychain.readAPIKey(for: newProvider) ?? "")
                 : ""
@@ -376,7 +378,7 @@ final class TranslationViewModel: ObservableObject {
             UserDefaults.standard.set(id.uuidString, forKey: "selectedCustomAPIID")
         } else {
             provider = source.provider
-            modelName = UserDefaults.standard.string(forKey: modelKey(for: source.provider)) ?? source.provider.defaultModel
+            modelName = Self.savedModel(for: source.provider)
             apiKey = source.provider.needsAPIKey
                 ? (keychain.readAPIKey(for: source.provider) ?? "")
                 : ""
@@ -992,6 +994,22 @@ final class TranslationViewModel: ObservableObject {
 
     private static func modelKey(for provider: ModelProvider) -> String {
         "modelName.\(provider.rawValue)"
+    }
+
+    private static func savedModel(for provider: ModelProvider) -> String {
+        let stored = UserDefaults.standard.string(forKey: modelKey(for: provider))
+            ?? (provider == .openAIChatGPT ? UserDefaults.standard.string(forKey: "modelName") : nil)
+        let trimmed = stored?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // Migrate the previous OpenAI translation default to the current fast model.
+        // An empty value means “use the default model” in the settings UI.
+        if provider == .openAIChatGPT,
+           trimmed.isEmpty || trimmed == "gpt-5.6-luna" {
+            let model = provider.defaultModel
+            UserDefaults.standard.set(model, forKey: modelKey(for: provider))
+            return model
+        }
+        return trimmed.isEmpty ? provider.defaultModel : trimmed
     }
 
     private static func customSourceID(_ id: UUID) -> String { "custom.\(id.uuidString)" }

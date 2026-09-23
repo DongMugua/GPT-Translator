@@ -12,6 +12,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     // Selected from the models currently exposed by the local agy account.
     // Flash + low reasoning is the latency-first configuration for translation.
     static let antigravityFastModel = "gemini-3.8-flash-low"
+    static let openAIDefaultModel = "gpt-6-luna"
 
     var id: String { rawValue }
 
@@ -66,7 +67,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     var modelOptions: [String] {
         switch self {
         case .openAIChatGPT:
-            return ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
+            return ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]
         case .antigravityOAuth:
             return []
         case .appleTranslation:
@@ -84,7 +85,7 @@ enum ModelProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var defaultModel: String {
         switch self {
-        case .openAIChatGPT: return ""
+        case .openAIChatGPT: return Self.openAIDefaultModel
         case .antigravityOAuth: return ""
         case .appleTranslation: return ""
         case .googleWeb: return ""
