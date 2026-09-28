@@ -13,6 +13,10 @@ let package = Package(
         .executableTarget(
             name: "GPTTranslator",
             path: "Sources/GPTTranslator"
+        ),
+        .testTarget(
+            name: "GPTTranslatorTests",
+            dependencies: ["GPTTranslator"]
         )
     ]
 )

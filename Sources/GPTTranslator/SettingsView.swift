@@ -162,6 +162,14 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Toggle("划词翻译显示原文", isOn: Binding(
+                        get: { globalController.showSelectionOriginalText },
+                        set: { globalController.setShowSelectionOriginalText($0) }
+                    ))
+                    Text("关闭后仅显示翻译或词典释义；修改会立即应用到已打开的划词窗口。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Toggle("自动判断中英文翻译方向", isOn: $viewModel.translateEnglishSelectionToChinese)
                     Text("检测到英文时译成中文，检测到中文时译成英文。是否处理中文可在菜单栏中快速切换。")
                         .font(.caption)
@@ -278,6 +286,7 @@ struct SettingsView: View {
             selectionEnabled: globalController.selectionEnabled,
             autoTranslateSelection: globalController.autoTranslateSelection,
             showSelectionButton: globalController.showSelectionButton,
+            showSelectionOriginalText: globalController.showSelectionOriginalText,
             translateShortcutModifiers: globalController.translateShortcutModifiers,
             translateShortcutKey: globalController.translateShortcutKey,
             screenshotShortcutModifiers: globalController.screenshotShortcutModifiers,
@@ -348,6 +357,7 @@ private struct AutomaticSaveSnapshot: Equatable {
     let selectionEnabled: Bool
     let autoTranslateSelection: Bool
     let showSelectionButton: Bool
+    let showSelectionOriginalText: Bool
     let translateShortcutModifiers: ShortcutModifiers
     let translateShortcutKey: ShortcutKey
     let screenshotShortcutModifiers: ShortcutModifiers

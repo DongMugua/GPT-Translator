@@ -104,6 +104,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     @Published private(set) var accessibilityTrusted = false
     @Published private(set) var isCapturing = false
     @Published var showSelectionButton: Bool
+    @Published private(set) var showSelectionOriginalText: Bool
     @Published var autoTranslateSelection: Bool
     @Published var selectionEnabled: Bool
     @Published var translateShortcutModifiers: ShortcutModifiers
@@ -152,6 +153,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
     private var quickInputWindow: QuickTranslationPanel?
     private var resultWindowAnchor: NSPoint?
+    private var pinnedResultWindowTopLeft: NSPoint?
+    private var isUpdatingResultWindowFrame = false
+    private var screenParametersObserver: NSObjectProtocol?
     private var resultSizingSubscription: AnyCancellable?
     private var workspaceActivationObserver: NSObjectProtocol?
     private var lastExternalApplicationPID: pid_t?
@@ -175,6 +179,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
     override init() {
         let defaults = UserDefaults.standard
+        showSelectionOriginalText = defaults.object(forKey: "showSelectionOriginalText") as? Bool ?? false
         let storedShowSelectionButton = defaults.object(forKey: "showSelectionButton") as? Bool
         let storedAutoTranslateSelection = defaults.object(forKey: "autoTranslateSelection") as? Bool
         if storedShowSelectionButton == nil, storedAutoTranslateSelection == nil {
@@ -236,6 +241,15 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 }
             }
         }
+        if screenParametersObserver == nil {
+            screenParametersObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.resizeResultWindowToFit() }
+            }
+        }
         startGlobalHotkeys()
     }
 
@@ -264,6 +278,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         hideFloatingButton()
         resultWindow?.close()
         resultWindow = nil
+        pinnedResultWindowTopLeft = nil
+        isResultWindowPinned = false
         screenshotEditorWindows.forEach { $0.orderOut(nil) }
         screenshotEditorWindows.removeAll()
         screenshotEditorWindow = nil
@@ -281,6 +297,10 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         quickInputWindow?.close()
         quickInputWindow = nil
         resultSizingSubscription = nil
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+            self.screenParametersObserver = nil
+        }
         if let workspaceActivationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver)
             self.workspaceActivationObserver = nil
@@ -421,6 +441,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     @discardableResult
     func saveSelectionPreferences() -> Bool {
         UserDefaults.standard.set(showSelectionButton, forKey: "showSelectionButton")
+        UserDefaults.standard.set(showSelectionOriginalText, forKey: "showSelectionOriginalText")
         UserDefaults.standard.set(autoTranslateSelection, forKey: "autoTranslateSelection")
         UserDefaults.standard.set(selectionEnabled, forKey: "selectionEnabled")
         UserDefaults.standard.set(translateShortcutModifiers.rawValue, forKey: "translateShortcutModifiers")
@@ -454,6 +475,13 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         UserDefaults.standard.set(autoTranslateSelection, forKey: "autoTranslateSelection")
         if !showButton { hideFloatingButton() }
         logger.info("Selection translation button mode=\(showButton, privacy: .public)")
+    }
+
+    func setShowSelectionOriginalText(_ showOriginal: Bool) {
+        guard showSelectionOriginalText != showOriginal else { return }
+        showSelectionOriginalText = showOriginal
+        UserDefaults.standard.set(showOriginal, forKey: "showSelectionOriginalText")
+        resizeResultWindowToFit()
     }
 
     var appleTranslationService: AppleTranslationService {
@@ -808,7 +836,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                     return
                 }
                 showResultWindow(at: NSEvent.mouseLocation)
-                viewModel.translateForFloatingWindow(recognizedText)
+                viewModel.translateForFloatingWindow(recognizedText, context: .screenshot)
             } catch {
                 viewModel?.errorMessage = error.localizedDescription
             }
@@ -1161,6 +1189,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
     func toggleResultWindowPinned() {
         isResultWindowPinned.toggle()
+        pinnedResultWindowTopLeft = isResultWindowPinned
+            ? resultWindow.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) }
+            : nil
     }
 
     private func startGlobalHotkeys() {
@@ -1457,12 +1488,12 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
     private func showResultWindow(at location: NSPoint) {
         guard let viewModel else { return }
-        resultWindowAnchor = location
-        let size = desiredResultWindowSize()
+        if !isResultWindowPinned { resultWindowAnchor = location }
+        let visible = resultWindowVisibleFrame(at: location)
+        let size = desiredResultWindowSize(in: visible)
         let panel: NSPanel
         if let resultWindow {
             panel = resultWindow
-            panel.contentView = NSHostingView(rootView: SelectionTranslationView(viewModel: viewModel, controller: self))
         } else {
             panel = NSPanel(
                 contentRect: NSRect(origin: .zero, size: size),
@@ -1477,15 +1508,17 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             panel.isReleasedWhenClosed = false
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.contentView = NSHostingView(rootView: SelectionTranslationView(viewModel: viewModel, controller: self))
+            panel.delegate = self
             resultWindow = panel
         }
 
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(location) }) ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let x = min(max(location.x + 12, visible.minX + 8), visible.maxX - size.width - 8)
-        let preferredY = location.y - size.height - 14
-        let y = min(max(preferredY, visible.minY + 8), visible.maxY - size.height - 8)
-        panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
+        let frame: NSRect
+        if isResultWindowPinned, let pinnedResultWindowTopLeft {
+            frame = ResultWindowLayout.frame(preserving: pinnedResultWindowTopLeft, size: size, visibleFrame: visible)
+        } else {
+            frame = ResultWindowLayout.frame(near: location, size: size, visibleFrame: visible)
+        }
+        setResultWindowFrame(frame, on: panel)
         panel.orderFrontRegardless()
         resultWindowShownAt = Date()
     }
@@ -1509,40 +1542,64 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
     private func resizeResultWindowToFit() {
         guard let panel = resultWindow, panel.isVisible else { return }
-        let size = desiredResultWindowSize()
-        let anchor = resultWindowAnchor ?? NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor) }) ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let top = min(panel.frame.maxY, visible.maxY - 8)
-        let x = min(max(panel.frame.minX, visible.minX + 8), visible.maxX - size.width - 8)
-        let y = max(visible.minY + 8, top - size.height)
-        panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true, animate: true)
+        let visible = resultWindowVisibleFrame(at: resultWindowAnchor ?? NSEvent.mouseLocation)
+        let size = desiredResultWindowSize(in: visible)
+        let topLeft = isResultWindowPinned
+            ? (pinnedResultWindowTopLeft ?? NSPoint(x: panel.frame.minX, y: panel.frame.maxY))
+            : NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+        let frame = ResultWindowLayout.frame(preserving: topLeft, size: size, visibleFrame: visible)
+        setResultWindowFrame(frame, on: panel)
     }
 
-    private func desiredResultWindowSize() -> NSSize {
+    private func resultWindowVisibleFrame(at location: NSPoint) -> NSRect {
+        let screens = NSScreen.screens
+        let referenceFrame = isResultWindowPinned
+            ? resultWindow?.frame ?? NSRect(origin: location, size: NSSize(width: 1, height: 1))
+            : NSRect(origin: location, size: NSSize(width: 1, height: 1))
+        if let index = ResultWindowLayout.screenIndex(for: referenceFrame, in: screens.map(\.frame)) {
+            return screens[index].visibleFrame
+        }
+        return NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    }
+
+    private func setResultWindowFrame(_ frame: NSRect, on panel: NSPanel) {
+        // Nonanimated updates keep didMove synchronous, so only a user's drag
+        // replaces the pinned anchor. Content growth must not move that anchor.
+        isUpdatingResultWindowFrame = true
+        defer { isUpdatingResultWindowFrame = false }
+        panel.setFrame(frame, display: true)
+    }
+
+    private func desiredResultWindowSize(in visibleFrame: NSRect) -> NSSize {
         guard let viewModel else { return NSSize(width: 420, height: 180) }
-        let texts = [viewModel.sourceText] + viewModel.comparisonResults.compactMap { $0.translatedText ?? $0.errorMessage }
+        var texts = viewModel.comparisonResults.compactMap { $0.translatedText ?? $0.errorMessage }
+        if showSelectionOriginalText { texts.insert(viewModel.sourceText, at: 0) }
         let font = NSFont.systemFont(ofSize: viewModel.resultFontSize)
         let longestLineWidth = texts
             .flatMap { $0.components(separatedBy: .newlines) }
             .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
             .max() ?? 280
-        let width = min(max(longestLineWidth + 88, 390), 560)
-        let textWidth = width - 56
-        let sourceHeight = min(measuredTextHeight(viewModel.sourceText, width: textWidth, font: .systemFont(ofSize: 11)), 160)
+        let width = min(max(longestLineWidth + 88, 390), 560, max(visibleFrame.width - 16, 1))
+        let textWidth = max(width - 56, 1)
+        let sourceHeight = showSelectionOriginalText
+            ? min(measuredTextHeight(viewModel.sourceText, width: textWidth, font: .systemFont(ofSize: 11)), 160) + 21
+            : 0
         let resultsHeight = viewModel.comparisonResults.reduce(CGFloat.zero) { total, result in
             let contentHeight: CGFloat
             if result.isLoading {
                 contentHeight = 20
             } else {
                 let content = result.translatedText ?? result.errorMessage ?? ""
-                contentHeight = measuredTextHeight(content, width: textWidth - 24, font: font)
+                contentHeight = measuredTextHeight(content, width: max(textWidth - 24, 1), font: font)
             }
-            return total + 54 + max(contentHeight, 18)
+            let noticeHeight = result.notice.map {
+                measuredTextHeight($0, width: max(textWidth - 24, 1), font: .systemFont(ofSize: 11)) + 8
+            } ?? 0
+            return total + 54 + max(contentHeight, 18) + noticeHeight
         }
         let gaps = CGFloat(max(viewModel.comparisonResults.count - 1, 0)) * 10
-        let naturalHeight = 91 + sourceHeight + resultsHeight + gaps
-        let screenLimit = (NSScreen.main?.visibleFrame.height ?? 900) * 0.72
+        let naturalHeight = 70 + sourceHeight + resultsHeight + gaps
+        let screenLimit = visibleFrame.height * 0.72
         return NSSize(width: width, height: min(max(naturalHeight, 155), screenLimit))
     }
 
@@ -1857,6 +1914,16 @@ private struct ScreenshotOCRStatusHUD: View {
     }
 }
 
+extension GlobalTranslationController: NSWindowDelegate {
+    func windowDidMove(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel,
+              panel === resultWindow,
+              isResultWindowPinned,
+              !isUpdatingResultWindowFrame else { return }
+        pinnedResultWindowTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+    }
+}
+
 private struct SelectionTranslationView: View {
     @ObservedObject var viewModel: TranslationViewModel
     @ObservedObject var controller: GlobalTranslationController
@@ -1867,7 +1934,7 @@ private struct SelectionTranslationView: View {
             HStack {
                 Image(systemName: "character.bubble.fill")
                     .foregroundStyle(.tint)
-                Text("翻译结果")
+                Text(viewModel.floatingTranslationMode == .dictionary ? "单词查询" : "翻译结果")
                     .font(.headline)
                 Spacer()
                 Button {
@@ -1877,30 +1944,32 @@ private struct SelectionTranslationView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(controller.isResultWindowPinned ? Color.accentColor : Color.secondary)
-                .help(controller.isResultWindowPinned ? "取消钉住；失焦后自动隐藏" : "钉住结果窗口")
+                .help(controller.isResultWindowPinned ? "取消钉住；下次翻译跟随鼠标，失焦后自动隐藏" : "钉住窗口位置；可拖动到其他位置")
             }
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(viewModel.sourceText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+                    if controller.showSelectionOriginalText {
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(viewModel.sourceText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
 
-                        Button("复制", systemImage: "doc.on.doc") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(viewModel.sourceText, forType: .string)
+                            Button("复制", systemImage: "doc.on.doc") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(viewModel.sourceText, forType: .string)
+                            }
+                            .buttonStyle(.borderless)
+                            .fixedSize()
+                            .help("复制识别或选中的原文")
                         }
-                        .buttonStyle(.borderless)
-                        .fixedSize()
-                        .help("复制识别或选中的原文")
-                    }
-                    .padding(.horizontal, 12)
+                        .padding(.horizontal, 12)
 
-                    Divider()
+                        Divider()
+                    }
 
                     ForEach(viewModel.comparisonResults) { result in
                         VStack(alignment: .leading, spacing: 8) {
@@ -1934,6 +2003,12 @@ private struct SelectionTranslationView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .textSelection(.enabled)
+                            }
+                            if let notice = result.notice {
+                                Text(notice)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         .padding(12)

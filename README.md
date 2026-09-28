@@ -1,6 +1,62 @@
-# GPT 翻译助手
+# GPT 翻译助手 · DongMugua 增强版
 
 一个原生 macOS SwiftUI 翻译软件：常驻菜单栏，使用 ChatGPT OAuth 登录的本机 Codex CLI 会话进行翻译，并支持跨应用划词、截图和 OCR。
+
+## 本分支优化（1.2.5-local.2，2026-09-28）
+
+这是 [DongMugua](https://github.com/DongMugua) 维护的个人增强 fork，基于 [fuyao123/GPT-Translator](https://github.com/fuyao123/GPT-Translator) 的 v1.2.5，基线提交为 `192f4c4e88a9c8dab00572fc6d1997f48d86cb61`。原项目由 [fuyao123](https://github.com/fuyao123) 开发，原作者署名、提交历史及第三方声明保留。本分支主要改善阅读文献时的划词体验，并修复图形界面启动时的 CLI 登录问题。
+
+- **可隐藏原文**：在“设置 → 划词翻译”中切换原文显示。默认隐藏原文，直接阅读结果；开关会保存，修改后立即影响已打开的结果窗。
+- **图钉固定窗口位置**：钉住后，后续划词与翻译完成时的窗口尺寸调整保留窗口左上角位置。可以拖动到新位置，后续结果保留该位置；取消钉住后恢复随选词位置弹出。接近屏幕边缘时优先保证窗口留在屏幕内。
+- **单词词典模式**：单个英语、西班牙语、法语或德语等拉丁字母单词自动显示词典式释义，支持重音字母、连字符和撇号；短语、句子继续普通翻译。主窗口、快捷输入框与截图保持原有翻译模式。中文、日文、韩文等连续书写文本继续普通翻译，避免把整句误判为一个词。
+- **修复 Node.js 路径问题**：从 Finder 启动时也能找到 Homebrew 安装的 Node.js，解决登录时的 `env: node: No such file or directory`；登录状态检测及 CLI 翻译共用修复后的进程环境。
+
+词典释义使用已启用的翻译源：LLM 来源按词性列出常见含义、可靠的音标与例句，并避免编造不存在的义项。Google 来源在接口提供词典数据时显示多义项，否则提示降级为普通翻译；Apple 离线翻译不提供词典义项，会明确提示这一限制。应用不会为查词擅自启用其他云端来源。模型生成的释义可能有误，并非授权词典原文。
+
+### 1.2.5-local.2：修复从 Finder 启动时无法登录
+
+修复 `env: node: No such file or directory`：macOS 图形应用可能没有终端中的完整 `PATH`。即使已经找到 Homebrew 安装的 `codex` 脚本，该脚本的 `#!/usr/bin/env node` 仍可能找不到 Node.js。
+
+现在登录、登录状态检测、常驻翻译和单次 CLI 翻译共用进程环境处理：保留已有环境和 PATH 顺序，补充 CLI 所在目录、Homebrew、本地用户与系统命令目录。Codex 和 Antigravity 的所有启动路径均已接入，不修改 shell 配置、系统环境或登录凭据。
+
+### 本地构建与验证
+
+```bash
+swift test --disable-xctest
+APP_OUTPUT_DIR="$PWD/dist/local" APP_VERSION="1.2.5-local.2" SIGNING_IDENTITY="-" zsh scripts/build-app.sh
+open "$PWD/dist/local/GPT翻译助手.app"
+```
+
+该命令把本地应用放入 `dist/local`。先退出原版，再打开本地构建；如 macOS 要求，重新为该应用授予辅助功能权限。图钉状态与位置保持到本次运行结束，不跨应用重启保存。
+
+回归检查：关闭/开启原文显示并重启确认设置保存；钉住后在不同位置连续划词、拖动窗口后再次划词；选择 `bank`、`well-being` 与 `bank account`，分别检查词典与普通翻译。自动测试覆盖单词判定、提示词、缓存模式与窗口布局；实际云服务输出和 macOS 辅助功能划词需要在安装后验证。
+
+本机已通过 27 项离线测试（Swift Testing，7 项窗口布局、12 项词典请求、8 项 CLI 进程环境），调试与 Release 构建通过；已打包 `1.2.5-local.2` Apple Silicon 应用并通过本地签名完整性验证。在精简 GUI PATH 下，用修复后的环境实际运行 `codex --version` 和 `codex login status` 均成功。实际模型输出、跨应用划词和多显示器实机操作尚未验证。
+
+<details>
+<summary>本机 Command Line Tools 环境的测试命令</summary>
+
+本机为 Apple Silicon、Swift 6.4，使用已安装的 macOS 26.5 SDK。只有 Command Line Tools 时，可能需要显式提供 Testing 框架及宏插件路径。以下命令在本地执行了全部 27 项测试；SDK 路径应按实际安装情况调整。
+
+```bash
+CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache" \
+SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache" \
+swift test --disable-xctest --enable-swift-testing --disable-sandbox \
+  --build-system native \
+  --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+  --cache-path "$PWD/.build/cache" --manifest-cache local \
+  -Xswiftc -F -Xswiftc /Library/Developer/CommandLineTools/Library/Developer/Frameworks \
+  -Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing \
+  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks
+```
+
+</details>
+
+### 许可证状态
+
+截至此基线提交，未找到主程序的项目级许可证。`THIRD_PARTY_NOTICES.md` 中的 Apache-2.0 声明仅适用于图标中的 Google Material Symbols 字形，并不授权整个应用。
+
+本 fork 未为上游代码另行添加 MIT、Apache 或其他项目许可证，也不声称已获得上游额外的修改与再分发授权。仓库公开及 GitHub 的 fork 功能不等于授予一般用途下的使用、修改或再分发许可；如需在 GitHub fork 功能之外使用或分发相关代码及应用，请先确认原作者授权。原作者署名与第三方声明不能替代项目许可证。相关说明见 [GitHub 仓库许可文档](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository)。
 
 ## 产品构想
 
@@ -58,9 +114,9 @@ open "$HOME/Applications/GPT翻译助手.app"
 
 应用图标采用自制蓝紫渐变双气泡设计；许可说明见 `THIRD_PARTY_NOTICES.md`。菜单栏图标为适配浅色和深色菜单栏的单色环形翻译标识。
 
-## DMG 安装
+## 上游原版 DMG 安装
 
-从 GitHub Releases 下载 `GPT-Translator-1.2.5-macOS.dmg`，打开后把“GPT 翻译助手”拖入 Applications。当前公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
+从[原项目 Releases](https://github.com/fuyao123/GPT-Translator/releases) 下载 `GPT-Translator-1.2.5-macOS.dmg`，打开后把“GPT 翻译助手”拖入 Applications。该原版安装包不包含本 fork 的优化；使用增强版请按上面的命令从本分支源码构建。当前应用内更新检查仍指向上游版本，不会分发本分支的改动。原版公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
 
 ## 隐私与凭据
 
@@ -69,9 +125,9 @@ open "$HOME/Applications/GPT翻译助手.app"
 - DeepSeek、智谱和自定义 API Key 仅写入当前用户的 macOS 钥匙串，不写入源码、配置文件或 DMG。
 - 每位安装者需要在自己的 Mac 上完成登录并填写自己的 API Key。
 
-## 请作者喝杯咖啡
+## 支持原作者
 
-如果这个小工具对你有帮助，可以自愿扫码支持后续维护。感谢使用。
+以下为原项目保留的赞赏二维码，收款方为原作者 fuyao123，并非本 fork 维护者。如果这个小工具对你有帮助，可以自愿扫码支持原作者后续维护。
 
 <img src="Assets/donate-wechat.jpg" alt="微信赞赏二维码" width="320">
 

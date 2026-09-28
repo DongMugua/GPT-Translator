@@ -90,6 +90,7 @@ struct ComparisonTranslationResult: Identifiable, Sendable {
     var translatedText: String?
     var errorMessage: String?
     var isLoading: Bool
+    var notice: String? = nil
 
     var id: String { source.id }
 }
@@ -129,6 +130,7 @@ final class TranslationViewModel: ObservableObject {
     @Published var floatingSourceIDs: Set<String>
     @Published private(set) var floatingSourceOrder: [String]
     @Published private(set) var comparisonResults: [ComparisonTranslationResult] = []
+    @Published private(set) var floatingTranslationMode: TranslationMode = .translation
     @Published private(set) var providerConnectionStates: [String: ProviderConnectionState] = [:]
     @Published private(set) var isTestingConnections = false
     @Published private(set) var updateState: AppUpdateState = .idle
@@ -141,8 +143,8 @@ final class TranslationViewModel: ObservableObject {
     private var automaticTranslationTask: Task<Void, Never>?
     private var pendingAutomaticTranslation = false
     private var lastSubmittedText = ""
-    private var translationCache: [String: String] = [:]
-    private var cacheOrder: [String] = []
+    private var translationCache: [TranslationCacheKey: String] = [:]
+    private var cacheOrder: [TranslationCacheKey] = []
     private var comparisonTasks: [Task<Void, Never>] = []
     private var connectionMonitorTask: Task<Void, Never>?
     private var hasStartedAntigravityWarmUp = false
@@ -598,7 +600,7 @@ final class TranslationViewModel: ObservableObject {
         translate()
     }
 
-    func translateForFloatingWindow(_ text: String) {
+    func translateForFloatingWindow(_ text: String, context: TranslationInputContext = .selection) {
         automaticTranslationTask?.cancel()
         comparisonTasks.forEach { $0.cancel() }
         comparisonTasks.removeAll()
@@ -608,12 +610,20 @@ final class TranslationViewModel: ObservableObject {
         translatedText = ""
         errorMessage = nil
 
-        let selected = enabledFloatingSources
-        comparisonResults = selected.map {
-            ComparisonTranslationResult(source: $0, translatedText: nil, errorMessage: nil, isLoading: true)
-        }
         let source = sourceLanguage
         let target = floatingTargetLanguage(for: text)
+        let mode = TranslationMode.resolve(text: text, context: context, source: source)
+        floatingTranslationMode = mode
+        let selected = enabledFloatingSources
+        comparisonResults = selected.map {
+            ComparisonTranslationResult(
+                source: $0,
+                translatedText: nil,
+                errorMessage: nil,
+                isLoading: true,
+                notice: mode.notice(for: $0.provider)
+            )
+        }
 
         for translationSource in selected {
             let selectedProvider = translationSource.provider
@@ -631,11 +641,13 @@ final class TranslationViewModel: ObservableObject {
                 provider: selectedProvider,
                 model: model,
                 reasoning: reasoning,
-                sourceID: translationSource.id
+                sourceID: translationSource.id,
+                mode: mode
             )
 
             if let cached = translationCache[cacheKey] {
                 updateComparisonResult(for: translationSource.id, translatedText: cached, errorMessage: nil)
+                if translationSource.id == activeSourceID { translatedText = cached }
                 continue
             }
 
@@ -649,10 +661,11 @@ final class TranslationViewModel: ObservableObject {
                             source: source,
                             target: target,
                             model: model,
-                            reasoning: reasoning
+                            reasoning: reasoning,
+                            mode: mode
                         )
                     } else if selectedProvider == .antigravityOAuth {
-                        result = try await antigravityService.translate(text: text, source: source, target: target)
+                        result = try await antigravityService.translate(text: text, source: source, target: target, mode: mode)
                     } else if selectedProvider == .appleTranslation {
                         result = try await appleService.translate(
                             text: text,
@@ -669,7 +682,8 @@ final class TranslationViewModel: ObservableObject {
                             model: model,
                             reasoning: reasoning,
                             apiKey: key,
-                            customEndpoint: customConfig?.endpoint ?? self.customAPIEndpoint
+                            customEndpoint: customConfig?.endpoint ?? self.customAPIEndpoint,
+                            mode: mode
                         )
                     }
                     guard !Task.isCancelled, self.sourceText == text else { return }
@@ -1039,11 +1053,11 @@ final class TranslationViewModel: ObservableObject {
         Self.modelKey(for: provider)
     }
 
-    private func makeCacheKey(text: String, source: LanguageOption, target: LanguageOption, provider: ModelProvider, model: String, reasoning: ReasoningEffort, sourceID: String? = nil) -> String {
-        [sourceID ?? provider.rawValue, model, reasoning.rawValue, source.rawValue, target.rawValue, text].joined(separator: "\u{1F}")
+    private func makeCacheKey(text: String, source: LanguageOption, target: LanguageOption, provider: ModelProvider, model: String, reasoning: ReasoningEffort, sourceID: String? = nil, mode: TranslationMode = .translation) -> TranslationCacheKey {
+        TranslationCacheKey(sourceID: sourceID ?? provider.rawValue, model: model, reasoning: reasoning, source: source, target: target, text: text, mode: mode)
     }
 
-    private func storeInCache(_ result: String, for key: String) {
+    private func storeInCache(_ result: String, for key: TranslationCacheKey) {
         if translationCache[key] == nil {
             cacheOrder.append(key)
         }

@@ -53,9 +53,9 @@ struct AntigravityCLIService: Sendable {
         }
     }
 
-    func translate(text: String, source: LanguageOption, target: LanguageOption) async throws -> String {
+    func translate(text: String, source: LanguageOption, target: LanguageOption, mode: TranslationMode = .translation) async throws -> String {
         guard let executableURL else { throw ServiceError.notInstalled }
-        let prompt = translationPrompt(text: text, source: source, target: target)
+        let prompt = TranslationPrompt.combined(text: text, source: source, target: target, mode: mode)
 
         do {
             return try await AntigravityStreamClient.shared.translate(
@@ -103,20 +103,6 @@ struct AntigravityCLIService: Sendable {
             || message.contains("403")
     }
 
-    private func translationPrompt(text: String, source: LanguageOption, target: LanguageOption) -> String {
-        let sourceDescription = source == .auto ? "the detected source language" : source.promptName
-        return """
-        Each request is independent. Ignore any previous requests or translations.
-        Translate the text below from \(sourceDescription) into \(target.promptName).
-        Preserve meaning, tone, paragraphs, punctuation, Markdown, and line breaks.
-        Return only the translation, without quotation marks, explanations, or a preface.
-
-        <text>
-        \(text)
-        </text>
-        """
-    }
-
     private func translateOneShot(executable: URL, prompt: String) async throws -> String {
         let output = await run(executable: executable, arguments: [
             "--disable-slash-commands",
@@ -150,9 +136,7 @@ struct AntigravityCLIService: Sendable {
                 process.executableURL = executable
                 process.arguments = arguments
                 process.currentDirectoryURL = FileManager.default.temporaryDirectory
-                var environment = ProcessInfo.processInfo.environment
-                environment["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
-                process.environment = environment
+                process.environment = CLIProcessEnvironment.make(for: executable)
                 let stdoutPipe = Pipe(), stderrPipe = Pipe()
                 process.standardOutput = stdoutPipe
                 process.standardError = stderrPipe
@@ -272,9 +256,7 @@ private final class AntigravityStreamClient: @unchecked Sendable {
             "--print-timeout", "45s"
         ]
         process.currentDirectoryURL = FileManager.default.temporaryDirectory
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
-        process.environment = environment
+        process.environment = CLIProcessEnvironment.make(for: executable)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -425,7 +407,8 @@ struct CodexCLIService: Sendable {
         source: LanguageOption,
         target: LanguageOption,
         model: String,
-        reasoning: ReasoningEffort
+        reasoning: ReasoningEffort,
+        mode: TranslationMode = .translation
     ) async throws -> String {
         guard isInstalled() else { throw ServiceError.codexNotInstalled }
         do {
@@ -435,6 +418,7 @@ struct CodexCLIService: Sendable {
                 target: target,
                 model: model,
                 reasoning: reasoning,
+                mode: mode,
                 executable: codexURL!
             )
         } catch {
@@ -444,17 +428,7 @@ struct CodexCLIService: Sendable {
             .appendingPathComponent("gpt-translator-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: outputURL) }
 
-        let sourceDescription = source == .auto ? "the detected source language" : source.promptName
-        let prompt = """
-        Each translation request is independent. Ignore any previous requests or translations.
-        Translate the text below from \(sourceDescription) into \(target.promptName).
-        Preserve meaning, tone, paragraphs, punctuation, Markdown, and line breaks.
-        Return only the translation, without quotation marks, explanations, or a preface.
-
-        <text>
-        \(text)
-        </text>
-        """
+        let prompt = TranslationPrompt.combined(text: text, source: source, target: target, mode: mode)
 
         var arguments = [
             "exec", "--disable", "plugins", "--disable", "apps", "--disable", "memories",
@@ -501,6 +475,7 @@ struct CodexCLIService: Sendable {
         }
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = CLIProcessEnvironment.make(for: executable)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -570,6 +545,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
         target: LanguageOption,
         model: String,
         reasoning: ReasoningEffort,
+        mode: TranslationMode,
         executable: URL
     ) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
@@ -581,6 +557,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
                         target: target,
                         model: model,
                         reasoning: reasoning,
+                        mode: mode,
                         executable: executable
                     )
                     continuation.resume(returning: result)
@@ -598,13 +575,13 @@ private final class CodexAppServerClient: @unchecked Sendable {
         target: LanguageOption,
         model: String,
         reasoning: ReasoningEffort,
+        mode: TranslationMode,
         executable: URL
     ) throws -> String {
         try ensureStarted(executable: executable, model: model, reasoning: reasoning)
         guard let activeThreadID = threadID else { throw CodexCLIService.ServiceError.emptyResult }
 
-        let sourceDescription = source == .auto ? "the detected source language" : source.promptName
-        let prompt = "Translate from \(sourceDescription) to \(target.promptName). Preserve formatting. Return only the translation.\n\n\(text)"
+        let prompt = TranslationPrompt.combined(text: text, source: source, target: target, mode: mode)
         let requestID = allocateRequestID()
         let selectedModel: Any = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : model
         try send([
@@ -667,6 +644,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
             "--disable", "recommended_plugins", "--disable", "browser_use", "--disable", "computer_use",
             "app-server", "--stdio", "-c", "mcp_servers={}"
         ]
+        process.environment = CLIProcessEnvironment.make(for: executable)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -711,7 +689,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
                 "environments": [],
                 "runtimeWorkspaceRoots": [],
                 "selectedCapabilityRoots": [],
-                "baseInstructions": "You are a translation engine. Never use tools. Each request is independent; ignore previous source text and translations. Return only the translation.",
+                "baseInstructions": TranslationPrompt.sessionInstructions,
                 "config": ["model_reasoning_effort": reasoning.rawValue]
             ]
         ])
@@ -837,10 +815,11 @@ struct DirectProviderService: Sendable {
         model: String,
         reasoning: ReasoningEffort,
         apiKey: String,
-        customEndpoint: String = ""
+        customEndpoint: String = "",
+        mode: TranslationMode = .translation
     ) async throws -> String {
         if provider == .googleWeb {
-            return try await translateWithGoogleWeb(text: text, source: source, target: target)
+            return try await translateWithGoogleWeb(text: text, source: source, target: target, mode: mode)
         }
         guard provider.needsAPIKey else { throw ServiceError.unsupportedProvider }
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -854,17 +833,12 @@ struct DirectProviderService: Sendable {
         }
         guard let url else { throw ServiceError.api("请填写有效的 API 接口地址。") }
 
-        let sourceDescription = source == .auto ? "the detected source language" : source.promptName
-        let systemPrompt = """
-        You are a professional translator. Translate from \(sourceDescription) into \(target.promptName).
-        Preserve meaning, tone, paragraphs, punctuation, Markdown, and line breaks.
-        Return only the translated text, without explanations or a preface.
-        """
+        let systemPrompt = TranslationPrompt.instructions(source: source, target: target, mode: mode)
         let body = RequestBody(
             model: model.isEmpty ? provider.defaultModel : model,
             messages: [
                 .init(role: "system", content: systemPrompt),
-                .init(role: "user", content: text)
+                .init(role: "user", content: TranslationPrompt.input(text: text, mode: mode))
             ],
             reasoning_effort: reasoning.apiValue
         )
@@ -896,7 +870,8 @@ struct DirectProviderService: Sendable {
     private func translateWithGoogleWeb(
         text: String,
         source: LanguageOption,
-        target: LanguageOption
+        target: LanguageOption,
+        mode: TranslationMode
     ) async throws -> String {
         var components = URLComponents(string: "https://translate.googleapis.com/translate_a/single")
         components?.queryItems = [
@@ -904,8 +879,11 @@ struct DirectProviderService: Sendable {
             URLQueryItem(name: "sl", value: source.googleCode),
             URLQueryItem(name: "tl", value: target.googleCode),
             URLQueryItem(name: "dt", value: "t"),
-            URLQueryItem(name: "q", value: text)
+            URLQueryItem(name: "q", value: TranslationPrompt.input(text: text, mode: mode))
         ]
+        if mode == .dictionary {
+            components?.queryItems?.append(URLQueryItem(name: "dt", value: "bd"))
+        }
         guard let url = components?.url else { throw ServiceError.invalidResponse }
 
         var request = URLRequest(url: url)
@@ -921,6 +899,10 @@ struct DirectProviderService: Sendable {
         }
         guard let root = try JSONSerialization.jsonObject(with: data) as? [Any],
               let segments = root.first as? [Any] else { throw ServiceError.invalidResponse }
+        if mode == .dictionary,
+           let entry = GoogleDictionaryResponse.entry(from: root, headword: TranslationPrompt.input(text: text, mode: mode)) {
+            return entry
+        }
         let translated = segments.compactMap { segment -> String? in
             guard let values = segment as? [Any], let value = values.first as? String else { return nil }
             return value
