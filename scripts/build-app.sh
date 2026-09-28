@@ -30,6 +30,7 @@ cp "$binary_path" "$app_path/Contents/MacOS/GPTTranslator"
 cp "$project_dir/Assets/AppIcon.icns" "$app_path/Contents/Resources/AppIcon.icns"
 cp "$project_dir/Assets/MenuBarIcon.png" "$app_path/Contents/Resources/MenuBarIcon.png"
 cp "$project_dir/THIRD_PARTY_NOTICES.md" "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md"
+cp "$project_dir/Assets/MaterialSymbols-LICENSE.txt" "$app_path/Contents/Resources/MaterialSymbols-LICENSE.txt"
 
 cat > "$app_path/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
