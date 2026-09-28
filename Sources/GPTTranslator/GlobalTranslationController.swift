@@ -173,6 +173,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var quickInputTargetPID: pid_t?
     private var quickInputTranslationTask: Task<Void, Never>?
     private var selectionMouseDownLocation: NSPoint?
+    private var selectionReadTask: Task<Void, Never>?
+    private var isReadingSelectionClipboard = false
 
     private static let hotKeySignature: OSType = 0x4750_5452 // GPTR
     private static let translateHotKeyID: UInt32 = 1
@@ -280,6 +282,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         mouseMonitor = nil
         localMouseMonitor = nil
         selectionMouseDownLocation = nil
+        selectionReadTask?.cancel()
+        selectionReadTask = nil
         screenshotKeyMonitor = nil
         screenshotGlobalKeyMonitor = nil
         hideFloatingButton()
@@ -386,6 +390,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         selectionEnabled = enabled
         UserDefaults.standard.set(selectionEnabled, forKey: "selectionEnabled")
         if !selectionEnabled {
+            selectionReadTask?.cancel()
+            selectionReadTask = nil
             hideFloatingButton()
             if !isResultWindowPinned { resultWindow?.orderOut(nil) }
         }
@@ -1243,10 +1249,13 @@ final class GlobalTranslationController: NSObject, ObservableObject {
 
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
             let eventType = event.type
+            let clickCount = event.clickCount
             let location = NSEvent.mouseLocation
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if eventType == .leftMouseDown {
+                    self.selectionReadTask?.cancel()
+                    self.selectionReadTask = nil
                     self.selectionMouseDownLocation = location
                     return
                 }
@@ -1260,11 +1269,14 @@ final class GlobalTranslationController: NSObject, ObservableObject {
                 // immediately after it appears.
                 guard !self.isMenuBarLocation(location), !self.isSelectionExcludedInteractionActive() else { return }
                 self.dismissUnpinnedResultIfNeeded(at: location)
-                self.handleSelectionMouseUp(allowClipboardFallback: didDrag)
+                let trigger = SelectionReadTrigger(didDrag: didDrag, clickCount: clickCount)
+                self.handleSelectionMouseUp(trigger: trigger, at: location)
             }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self else { return event }
+            self.selectionReadTask?.cancel()
+            self.selectionReadTask = nil
             let location = NSEvent.mouseLocation
             if !self.isMenuBarLocation(location), !self.isSelectionExcludedInteractionActive() {
                 self.dismissUnpinnedResultIfNeeded(at: location)
@@ -1328,37 +1340,49 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         }
     }
 
-    private func handleSelectionMouseUp(allowClipboardFallback: Bool) {
-        let location = NSEvent.mouseLocation
+    private func handleSelectionMouseUp(trigger: SelectionReadTrigger, at location: NSPoint) {
+        selectionReadTask?.cancel()
+        selectionReadTask = nil
         guard selectionEnabled,
               !NSApp.isActive,
               (showSelectionButton || autoTranslateSelection),
               !isMenuBarLocation(location),
               !isSelectionExcludedInteractionActive() else { return }
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" else {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.bundleIdentifier != "com.apple.finder" else {
             hideFloatingButton()
             return
         }
         accessibilityTrusted = AXIsProcessTrusted()
         guard accessibilityTrusted else { return }
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 180_000_000)
+        let applicationPID = application.processIdentifier
+        let delay = trigger.delay(doubleClickInterval: NSEvent.doubleClickInterval)
+        selectionReadTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch { return }
             guard let self,
+                  !Task.isCancelled,
                   self.selectionEnabled,
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder",
+                  !NSApp.isActive,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == applicationPID,
                   !self.isMenuBarLocation(NSEvent.mouseLocation),
                   !self.isSelectionExcludedInteractionActive(),
-                  let text = await self.selectedTextWithClipboardFallback(allowClipboardFallback: allowClipboardFallback),
+                  let text = await self.selectedTextWithClipboardFallback(allowClipboardFallback: trigger.allowsClipboardFallback),
+                  !Task.isCancelled,
+                  self.selectionEnabled,
+                  !NSApp.isActive,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == applicationPID,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             guard self.viewModel?.shouldTranslateFloatingText(text) != false else {
                 self.hideFloatingButton()
                 return
             }
             if self.autoTranslateSelection {
-                self.showResultWindow(at: NSEvent.mouseLocation)
+                self.showResultWindow(at: location)
                 self.viewModel?.translateForFloatingWindow(text)
             } else if self.showSelectionButton {
-                self.showFloatingButton(for: text, at: NSEvent.mouseLocation)
+                self.showFloatingButton(for: text, at: location)
             }
         }
     }
@@ -1700,6 +1724,7 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
 
     private func selectedTextWithClipboardFallback(allowClipboardFallback: Bool = true) async -> String? {
+        guard !Task.isCancelled else { return nil }
         if let text = selectedText(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text
         }
@@ -1708,6 +1733,34 @@ final class GlobalTranslationController: NSObject, ObservableObject {
               let application = NSWorkspace.shared.frontmostApplication,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
 
+        // Let an earlier copy finish restoring the clipboard before starting
+        // the latest selection. Waiting requests remain freely cancellable.
+        while isReadingSelectionClipboard {
+            do { try await Task.sleep(nanoseconds: 10_000_000) }
+            catch { return nil }
+        }
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
+              !NSApp.isActive,
+              !isSelectionExcludedInteractionActive() else { return nil }
+        isReadingSelectionClipboard = true
+        defer { isReadingSelectionClipboard = false }
+        // Once Command-C is posted, this bounded transaction must finish even
+        // when another click cancels the caller. Otherwise a late copy could
+        // overwrite the clipboard after the restore already ran.
+        let copiedText = await Task { @MainActor in
+            await self.copiedSelectionRestoringClipboard(from: application)
+        }.value
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier else { return nil }
+        return copiedText
+    }
+
+    private func copiedSelectionRestoringClipboard(from application: NSRunningApplication) async -> String? {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier,
+              !NSApp.isActive,
+              !isMenuBarLocation(NSEvent.mouseLocation),
+              !isSelectionExcludedInteractionActive() else { return nil }
         let pasteboard = NSPasteboard.general
         let savedItems = pasteboard.pasteboardItems?.map { item in
             item.types.reduce(into: [NSPasteboard.PasteboardType: Data]()) { values, type in

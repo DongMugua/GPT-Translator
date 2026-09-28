@@ -4,16 +4,17 @@
 
 ## 下载增强版
 
-[最新 Release](https://github.com/DongMugua/GPT-Translator/releases/latest) · [DMG 安装包](https://github.com/DongMugua/GPT-Translator/releases/download/v1.2.5-local.3/GPT-Translator-1.2.5-local.3-macOS-arm64.dmg) · [ZIP 应用包](https://github.com/DongMugua/GPT-Translator/releases/download/v1.2.5-local.3/GPT-Translator-1.2.5-local.3-macOS-arm64.zip)
+[最新 Release](https://github.com/DongMugua/GPT-Translator/releases/latest) · [DMG 安装包](https://github.com/DongMugua/GPT-Translator/releases/download/v1.2.5-local.4/GPT-Translator-1.2.5-local.4-macOS-arm64.dmg) · [ZIP 应用包](https://github.com/DongMugua/GPT-Translator/releases/download/v1.2.5-local.4/GPT-Translator-1.2.5-local.4-macOS-arm64.zip)
 
 当前提供 Apple Silicon（M 系列，arm64）版本，要求 macOS 13 或更高版本；Apple 离线翻译要求 macOS 15 或更高版本。先退出旧版，再打开 DMG 将应用拖入 Applications，或解压 ZIP 后打开应用。该版本采用本地签名，未经 Apple Developer ID 公证；首次打开及辅助功能权限可能需要在系统设置中确认。下载校验值和具体验证范围见 Release 页面。
 
 应用内更新检查仍指向上游，请通过本仓库 Releases 手动更新增强版。使用 OpenAI/ChatGPT OAuth 仍需在本机安装 Node.js、Codex CLI 并完成登录；发布包不附带 CLI 或个人登录凭据。
 
-## 本分支优化（1.2.5-local.3，2026-09-28）
+## 本分支优化（1.2.5-local.4，2026-09-28）
 
 这是 [DongMugua](https://github.com/DongMugua) 维护的个人增强 fork，基于 [fuyao123/GPT-Translator](https://github.com/fuyao123/GPT-Translator) 的 v1.2.5，基线提交为 `192f4c4e88a9c8dab00572fc6d1997f48d86cb61`。原项目由 [fuyao123](https://github.com/fuyao123) 开发，原作者署名、提交历史及第三方声明保留。本分支主要改善阅读文献时的划词体验，并修复图形界面启动时的 CLI 登录问题。
 
+- **双击选词识别**：双击选中的单词和拖动选词一样触发词典查询，沿用“直接翻译 / 显示翻译图标”设置；三击选中的段落继续普通翻译。
 - **保留论文内容结构**：读取选区可用的富文本属性，保留基本粗体、斜体和上下标；翻译时保护可识别的公式、代码和数字引用，避免把变量翻译成汉字，并保留段落结构。结果原生显示基本 Markdown 和简单公式。
 - **固定宽度、可调窗口**：拖动边框可调整宽度和高度。宽度由用户决定并保存，不再被译文撑大；高度随内容调整，到达用户设定的高度上限或屏幕边缘后使用纵向滚动。
 - **可隐藏原文**：在“设置 → 划词翻译”中切换原文显示。默认隐藏原文，直接阅读结果；开关会保存，修改后立即影响已打开的结果窗。
@@ -22,6 +23,10 @@
 - **修复 Node.js 路径问题**：从 Finder 启动时也能找到 Homebrew 安装的 Node.js，解决登录时的 `env: node: No such file or directory`；登录状态检测及 CLI 翻译共用修复后的进程环境。
 
 词典释义使用已启用的翻译源：LLM 来源按词性列出常见含义、可靠的音标与例句，并避免编造不存在的义项。Google 来源在接口提供词典数据时显示多义项，否则提示降级为普通翻译；Apple 离线翻译不提供词典义项，会明确提示这一限制。应用不会为查词擅自启用其他云端来源。模型生成的释义可能有误，并非授权词典原文。
+
+### 1.2.5-local.4：双击选词
+
+双击选中的单词也会使用备用取词方式，兼容不直接暴露选中文字的 PDF 阅读器。连续点击时会取消过时的识别任务，切换应用后不会回填旧选区；取词复制过程串行完成并恢复剪贴板。普通单击不触发备用复制，菜单及控件的排除规则继续保留。
 
 ### 1.2.5-local.3：格式化翻译与窗口尺寸
 
@@ -41,7 +46,7 @@
 
 ```bash
 swift test --disable-xctest
-APP_OUTPUT_DIR="$PWD/dist/local" APP_VERSION="1.2.5-local.3" SIGNING_IDENTITY="-" zsh scripts/build-app.sh
+APP_OUTPUT_DIR="$PWD/dist/local" APP_VERSION="1.2.5-local.4" SIGNING_IDENTITY="-" zsh scripts/build-app.sh
 open "$PWD/dist/local/GPT翻译助手.app"
 ```
 
@@ -49,12 +54,12 @@ open "$PWD/dist/local/GPT翻译助手.app"
 
 回归检查：关闭/开启原文显示并重启确认设置保存；钉住后在不同位置连续划词、拖动窗口后再次划词；选择 `bank`、`well-being` 与 `bank account`，分别检查词典与普通翻译。再选择包含段落和公式的文字，调整窗口宽高，检查宽度保持、自动高度及能否滚动到最后一段；实际云服务输出和跨应用划词仍需在安装后验证。
 
-本机已通过 63 项离线测试（Swift Testing，7 个测试套件），覆盖词典请求、CLI 环境、富文本提取、公式保护与恢复、格式显示和窗口布局。其中包含实际 AppKit/SwiftUI 承载视图与 TextKit 的高度测量、长内容换行及滚动至末尾检查。此前已在精简 GUI PATH 下验证真实 `codex --version` 与 `codex login status` 成功；本次实际云端翻译、跨应用划词及多显示器实机操作的验证情况以对应 Release 页面为准。
+本机已通过 66 项离线测试（Swift Testing，8 个测试套件），覆盖双击/拖动取词触发、词典请求、CLI 环境、富文本提取、公式保护与恢复、格式显示和窗口布局。其中包含实际 AppKit/SwiftUI 承载视图与 TextKit 的高度测量、长内容换行及滚动至末尾检查。此前已在精简 GUI PATH 下验证真实 `codex --version` 与 `codex login status` 成功；本次实际云端翻译、跨应用划词及多显示器实机操作的验证情况以对应 Release 页面为准。
 
 <details>
 <summary>本机 Command Line Tools 环境的测试命令</summary>
 
-本机为 Apple Silicon、Swift 6.4，使用已安装的 macOS 26.5 SDK。只有 Command Line Tools 时，可能需要显式提供 Testing 框架及宏插件路径。以下命令在本地执行了全部 63 项测试；SDK 路径应按实际安装情况调整。
+本机为 Apple Silicon、Swift 6.4，使用已安装的 macOS 26.5 SDK。只有 Command Line Tools 时，可能需要显式提供 Testing 框架及宏插件路径。以下命令在本地执行了全部 66 项测试；SDK 路径应按实际安装情况调整。
 
 ```bash
 CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache" \
