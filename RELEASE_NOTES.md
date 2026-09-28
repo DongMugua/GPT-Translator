@@ -1,3 +1,45 @@
+# v1.2.5-local.2 · 划词体验增强与登录修复
+
+DongMugua 增强分支的首个发布版本，基于 [fuyao123/GPT-Translator](https://github.com/fuyao123/GPT-Translator) v1.2.5。保留原作者署名、提交历史及第三方声明。
+
+## 四项优化
+
+- **原文显示开关**：新增“划词翻译显示原文”设置，默认隐藏原文，设置会保存并立即生效。
+- **钉住窗口保留位置**：连续划词与结果大小变化时保留窗口左上角；拖动后使用新位置，取消钉住后恢复随鼠标弹出。屏幕边缘会适当调整位置以保证可见，钉住状态不跨重启保存。
+- **单词词典模式**：单个拉丁字母单词显示词性、常见多义项及例句，支持重音、连字符和撇号；短语、句子照常翻译。主窗口、快捷输入和截图仍使用普通翻译。
+- **修复 GUI 登录环境**：补齐 CLI 进程查找路径，解决 Finder 启动时的 `env: node: No such file or directory`。登录、状态检测和翻译进程均使用修复后的环境。
+
+## 下载与安装
+
+- `GPT-Translator-1.2.5-local.2-macOS-arm64.dmg`：推荐，打开后将应用拖入 Applications。
+- `GPT-Translator-1.2.5-local.2-macOS-arm64.zip`：解压即得应用。
+- `SHA256SUMS.txt`：下载文件的 SHA-256 校验值。
+- `BUILD_INFO.txt`：构建对应的源码提交、架构和签名说明。
+
+安装包适用于 **Apple Silicon（M 系列，arm64）Mac**，不适用于 Intel Mac。最低要求 macOS 13；Apple 离线翻译要求 macOS 15 或更高版本。
+
+先退出旧版再安装。当前构建采用本地 ad-hoc 签名，**未经 Apple Developer ID 公证**；若系统拦截首次打开，请在“系统设置 → 隐私与安全性”中查看提示。划词需辅助功能权限，截图需屏幕录制权限。
+
+OpenAI/ChatGPT OAuth 来源仍需自行安装 Node.js、Codex CLI 并完成登录；Gemini 来源需自行配置 Antigravity CLI。安装包不包含这些 CLI、API Key、OAuth 登录凭据或本机偏好设置。
+
+## 验证范围与已知限制
+
+- 27 项离线自动测试通过：7 项窗口布局、12 项词典请求、8 项 CLI 环境测试。
+- 调试及 Release 构建通过；应用签名完整性、安装包内容和校验值已检查。这不等于 Apple 公证。
+- 模拟精简 GUI PATH 后，真实 Codex CLI 版本查询和登录状态检测通过。
+- 实际云端释义、跨应用划词及真实多屏拖动尚未完成实机验证。
+- Google 词典义项依赖接口返回；Apple 离线翻译仍仅给出译文并提示能力限制。模型释义可能有误。
+- 内置更新检查仍指向上游。请从 [DongMugua/GPT-Translator Releases](https://github.com/DongMugua/GPT-Translator/releases) 手动更新本增强版。
+
+## 来源与许可证状态
+
+原项目作者为 [fuyao123](https://github.com/fuyao123)，上游基线为 `192f4c4e88a9c8dab00572fc6d1997f48d86cb61`。上游尚未提供主程序的项目级许可证，本 fork 未为其代码另行添加许可证或声称获得额外授权；具体状态见仓库 README。
+
+Google Material Symbols 图标对应的 Apache 2.0 许可证和第三方声明已随应用附带；该许可证仅针对相应素材，不适用于整个应用。
+
+
+---
+
 # GPT 翻译助手 1.2.5
 
 1.2.5 将 OpenAI/ChatGPT OAuth 翻译源的默认模型切换到 GPT-6 Luna。

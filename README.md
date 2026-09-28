@@ -2,6 +2,14 @@
 
 一个原生 macOS SwiftUI 翻译软件：常驻菜单栏，使用 ChatGPT OAuth 登录的本机 Codex CLI 会话进行翻译，并支持跨应用划词、截图和 OCR。
 
+## 下载增强版
+
+[最新 Release](https://github.com/DongMugua/GPT-Translator/releases/latest) · [DMG 安装包](https://github.com/DongMugua/GPT-Translator/releases/download/v1.2.5-local.2/GPT-Translator-1.2.5-local.2-macOS-arm64.dmg) · [ZIP 应用包](https://github.com/DongMugua/GPT-Translator/releases/download/v1.2.5-local.2/GPT-Translator-1.2.5-local.2-macOS-arm64.zip)
+
+当前提供 Apple Silicon（M 系列，arm64）版本，要求 macOS 13 或更高版本；Apple 离线翻译要求 macOS 15 或更高版本。先退出旧版，再打开 DMG 将应用拖入 Applications，或解压 ZIP 后打开应用。该版本采用本地签名，未经 Apple Developer ID 公证；首次打开及辅助功能权限可能需要在系统设置中确认。下载校验值和具体验证范围见 Release 页面。
+
+应用内更新检查仍指向上游，请通过本仓库 Releases 手动更新增强版。使用 OpenAI/ChatGPT OAuth 仍需在本机安装 Node.js、Codex CLI 并完成登录；发布包不附带 CLI 或个人登录凭据。
+
 ## 本分支优化（1.2.5-local.2，2026-09-28）
 
 这是 [DongMugua](https://github.com/DongMugua) 维护的个人增强 fork，基于 [fuyao123/GPT-Translator](https://github.com/fuyao123/GPT-Translator) 的 v1.2.5，基线提交为 `192f4c4e88a9c8dab00572fc6d1997f48d86cb61`。原项目由 [fuyao123](https://github.com/fuyao123) 开发，原作者署名、提交历史及第三方声明保留。本分支主要改善阅读文献时的划词体验，并修复图形界面启动时的 CLI 登录问题。
@@ -116,7 +124,7 @@ open "$HOME/Applications/GPT翻译助手.app"
 
 ## 上游原版 DMG 安装
 
-从[原项目 Releases](https://github.com/fuyao123/GPT-Translator/releases) 下载 `GPT-Translator-1.2.5-macOS.dmg`，打开后把“GPT 翻译助手”拖入 Applications。该原版安装包不包含本 fork 的优化；使用增强版请按上面的命令从本分支源码构建。当前应用内更新检查仍指向上游版本，不会分发本分支的改动。原版公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
+从[原项目 Releases](https://github.com/fuyao123/GPT-Translator/releases) 下载 `GPT-Translator-1.2.5-macOS.dmg`，打开后把“GPT 翻译助手”拖入 Applications。该原版安装包不包含本 fork 的优化；使用增强版请从[本仓库 Releases](https://github.com/DongMugua/GPT-Translator/releases/latest) 下载，或按上面的命令从本分支源码构建。当前应用内更新检查仍指向上游版本，不会分发本分支的改动。原版公开构建未使用 Apple Developer ID 公证；macOS 首次打开时可能需要在 Finder 中右键应用并选择“打开”。
 
 ## 隐私与凭据
 
