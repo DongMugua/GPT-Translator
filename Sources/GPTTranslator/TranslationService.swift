@@ -54,6 +54,13 @@ struct AntigravityCLIService: Sendable {
     }
 
     func translate(text: String, source: LanguageOption, target: LanguageOption, mode: TranslationMode = .translation) async throws -> String {
+        let input = ProtectedTranslationInput(text: text, mode: mode)
+        guard input.hasTranslatableText else { return input.originalText }
+        let output = try await translatePrepared(text: input.text, source: source, target: target, mode: mode)
+        return try input.restore(in: output)
+    }
+
+    private func translatePrepared(text: String, source: LanguageOption, target: LanguageOption, mode: TranslationMode) async throws -> String {
         guard let executableURL else { throw ServiceError.notInstalled }
         let prompt = TranslationPrompt.combined(text: text, source: source, target: target, mode: mode)
 
@@ -409,6 +416,20 @@ struct CodexCLIService: Sendable {
         model: String,
         reasoning: ReasoningEffort,
         mode: TranslationMode = .translation
+    ) async throws -> String {
+        let input = ProtectedTranslationInput(text: text, mode: mode)
+        guard input.hasTranslatableText else { return input.originalText }
+        let output = try await translatePrepared(text: input.text, source: source, target: target, model: model, reasoning: reasoning, mode: mode)
+        return try input.restore(in: output)
+    }
+
+    private func translatePrepared(
+        text: String,
+        source: LanguageOption,
+        target: LanguageOption,
+        model: String,
+        reasoning: ReasoningEffort,
+        mode: TranslationMode
     ) async throws -> String {
         guard isInstalled() else { throw ServiceError.codexNotInstalled }
         do {
@@ -817,6 +838,23 @@ struct DirectProviderService: Sendable {
         apiKey: String,
         customEndpoint: String = "",
         mode: TranslationMode = .translation
+    ) async throws -> String {
+        let input = ProtectedTranslationInput(text: text, mode: mode)
+        guard input.hasTranslatableText else { return input.originalText }
+        let output = try await translatePrepared(text: input.text, source: source, target: target, provider: provider, model: model, reasoning: reasoning, apiKey: apiKey, customEndpoint: customEndpoint, mode: mode)
+        return try input.restore(in: output)
+    }
+
+    private func translatePrepared(
+        text: String,
+        source: LanguageOption,
+        target: LanguageOption,
+        provider: ModelProvider,
+        model: String,
+        reasoning: ReasoningEffort,
+        apiKey: String,
+        customEndpoint: String,
+        mode: TranslationMode
     ) async throws -> String {
         if provider == .googleWeb {
             return try await translateWithGoogleWeb(text: text, source: source, target: target, mode: mode)

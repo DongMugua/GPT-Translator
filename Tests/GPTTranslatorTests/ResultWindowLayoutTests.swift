@@ -5,6 +5,87 @@ import Testing
 struct ResultWindowLayoutTests {
     private let desktop = CGRect(x: 0, y: 0, width: 1440, height: 900)
 
+    @Test func testResultLengthOnlyChangesHeight() {
+        let available = CGSize(width: 1424, height: 862)
+        let short = ResultWindowLayout.contentSize(
+            preferredWidth: 470, naturalHeight: 190, userHeightLimit: nil,
+            currentHeight: 180, isLoading: false, availableSize: available
+        )
+        let long = ResultWindowLayout.contentSize(
+            preferredWidth: 470, naturalHeight: 2100, userHeightLimit: nil,
+            currentHeight: short.height, isLoading: false, availableSize: available
+        )
+        #expect(short == CGSize(width: 470, height: 190))
+        #expect(long == CGSize(width: 470, height: 862))
+    }
+
+    @Test func testManualHeightIsRespectedAsViewportLimit() {
+        let available = CGSize(width: 1424, height: 862)
+        let long = ResultWindowLayout.contentSize(
+            preferredWidth: 620, naturalHeight: 800, userHeightLimit: 350,
+            currentHeight: 350, isLoading: false, availableSize: available
+        )
+        let short = ResultWindowLayout.contentSize(
+            preferredWidth: 620, naturalHeight: 205, userHeightLimit: 350,
+            currentHeight: 350, isLoading: false, availableSize: available
+        )
+        #expect(long == CGSize(width: 620, height: 350))
+        #expect(short == CGSize(width: 620, height: 205))
+    }
+
+    @Test func testLoadingKeepsPreviousHeightUntilResultIsReady() {
+        let available = CGSize(width: 1424, height: 862)
+        let loading = ResultWindowLayout.contentSize(
+            preferredWidth: 500, naturalHeight: 145, userHeightLimit: nil,
+            currentHeight: 620, isLoading: true, availableSize: available
+        )
+        let finished = ResultWindowLayout.contentSize(
+            preferredWidth: 500, naturalHeight: 220, userHeightLimit: nil,
+            currentHeight: loading.height, isLoading: false, availableSize: available
+        )
+        #expect(loading.height == 620)
+        #expect(finished.height == 220)
+    }
+
+    @Test func testTitleBarIsExcludedFromAvailableContentHeight() {
+        let available = ResultWindowLayout.availableContentSize(in: desktop, titleBarHeight: 28)
+        #expect(available == CGSize(width: 1424, height: 856))
+        let content = ResultWindowLayout.contentSize(
+            preferredWidth: 500, naturalHeight: 10000, userHeightLimit: nil,
+            currentHeight: 180, isLoading: false, availableSize: available
+        )
+        let frame = ResultWindowLayout.frame(
+            preserving: CGPoint(x: 100, y: 892),
+            size: CGSize(width: content.width, height: content.height + 28),
+            visibleFrame: desktop
+        )
+        #expect(frame.minY == 8)
+        #expect(frame.maxY == 892)
+    }
+
+    @Test func testPinnedGrowthUsesSpaceBelowPinWithoutMovingIt() {
+        let pin = CGPoint(x: 320, y: 370)
+        let available = ResultWindowLayout.availableContentSize(in: desktop, titleBarHeight: 28, pinnedTopLeft: pin)
+        let content = ResultWindowLayout.contentSize(
+            preferredWidth: 500, naturalHeight: 1800, userHeightLimit: nil,
+            currentHeight: 180, isLoading: false, availableSize: available
+        )
+        let frame = ResultWindowLayout.frame(
+            preserving: pin, size: CGSize(width: content.width, height: content.height + 28), visibleFrame: desktop
+        )
+        #expect(frame.minX == pin.x)
+        #expect(frame.maxY == pin.y)
+        #expect(frame.minY == 8)
+    }
+
+    @Test func testSmallScreenAndStaleMeasurementRemainBounded() {
+        let size = ResultWindowLayout.contentSize(
+            preferredWidth: 700, naturalHeight: nil, userHeightLimit: 900,
+            currentHeight: 450, isLoading: false, availableSize: CGSize(width: 280, height: 110)
+        )
+        #expect(size == CGSize(width: 280, height: 110))
+    }
+
     @Test func testPinnedTopLeftSurvivesDifferentTranslationSizes() {
         let pinned = CGPoint(x: 320, y: 760)
         for size in [CGSize(width: 390, height: 180), CGSize(width: 560, height: 580), CGSize(width: 410, height: 230)] {

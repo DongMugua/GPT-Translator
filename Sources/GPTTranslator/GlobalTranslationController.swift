@@ -155,8 +155,12 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     private var resultWindowAnchor: NSPoint?
     private var pinnedResultWindowTopLeft: NSPoint?
     private var isUpdatingResultWindowFrame = false
+    private var resultPreferredContentWidth = ResultWindowLayout.defaultContentWidth
+    private var resultUserHeightLimit: CGFloat?
+    private var resultContentMeasurement = ResultContentMeasurement()
+    private var resultResizeScheduled = false
+    private var resultLiveResizeStartSize: NSSize?
     private var screenParametersObserver: NSObjectProtocol?
-    private var resultSizingSubscription: AnyCancellable?
     private var workspaceActivationObserver: NSObjectProtocol?
     private var lastExternalApplicationPID: pid_t?
     private var lastExternalFocusedElement: AXUIElement?
@@ -216,16 +220,19 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             .flatMap { try? JSONDecoder().decode([QuickTranslationHistoryItem].self, from: $0) } ?? []
         showInDock = defaults.object(forKey: "showInDock") as? Bool ?? true
         launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? false
+        let storedResultWidth = defaults.double(forKey: "selectionResultContentWidth")
+        if storedResultWidth.isFinite, storedResultWidth >= ResultWindowLayout.minimumContentSize.width {
+            resultPreferredContentWidth = storedResultWidth
+        }
+        let storedResultHeight = defaults.double(forKey: "selectionResultHeightLimit")
+        if storedResultHeight.isFinite, storedResultHeight >= ResultWindowLayout.minimumContentSize.height {
+            resultUserHeightLimit = storedResultHeight
+        }
         super.init()
     }
 
     func connect(to viewModel: TranslationViewModel) {
         self.viewModel = viewModel
-        resultSizingSubscription = viewModel.$comparisonResults
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.resizeResultWindowToFit() }
-            }
         accessibilityTrusted = AXIsProcessTrusted()
         logger.info("connect accessibilityTrusted=\(self.accessibilityTrusted, privacy: .public)")
         applyDockVisibility()
@@ -296,7 +303,6 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         quickInputTranslationTask?.cancel()
         quickInputWindow?.close()
         quickInputWindow = nil
-        resultSizingSubscription = nil
         if let screenParametersObserver {
             NotificationCenter.default.removeObserver(screenParametersObserver)
             self.screenParametersObserver = nil
@@ -1490,14 +1496,13 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         guard let viewModel else { return }
         if !isResultWindowPinned { resultWindowAnchor = location }
         let visible = resultWindowVisibleFrame(at: location)
-        let size = desiredResultWindowSize(in: visible)
         let panel: NSPanel
         if let resultWindow {
             panel = resultWindow
         } else {
             panel = NSPanel(
-                contentRect: NSRect(origin: .zero, size: size),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
+                contentRect: NSRect(x: 0, y: 0, width: resultPreferredContentWidth, height: 180),
+                styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
             )
@@ -1507,11 +1512,29 @@ final class GlobalTranslationController: NSObject, ObservableObject {
             panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            panel.contentView = NSHostingView(rootView: SelectionTranslationView(viewModel: viewModel, controller: self))
+            panel.contentMinSize = ResultWindowLayout.minimumContentSize
+            let hostingView = NSHostingView(rootView: SelectionTranslationView(viewModel: viewModel, controller: self))
+            // SwiftUI's ideal text width must never resize the AppKit window.
+            // The panel owns its viewport; SwiftUI measures only the content.
+            hostingView.sizingOptions = []
+            panel.contentView = hostingView
             panel.delegate = self
             resultWindow = panel
         }
 
+        // Reusing the viewport also avoids a collapse to loading-placeholder
+        // size before the next translation has supplied any content.
+        let titleBarHeight = panel.frame.height - panel.contentRect(forFrameRect: panel.frame).height
+        let currentContentSize = panel.contentRect(forFrameRect: panel.frame).size
+        let contentSize = ResultWindowLayout.contentSize(
+            preferredWidth: resultPreferredContentWidth,
+            naturalHeight: nil,
+            userHeightLimit: resultUserHeightLimit,
+            currentHeight: currentContentSize.height,
+            isLoading: true,
+            availableSize: ResultWindowLayout.availableContentSize(in: visible, titleBarHeight: titleBarHeight)
+        )
+        let size = panel.frameRect(forContentRect: NSRect(origin: .zero, size: contentSize)).size
         let frame: NSRect
         if isResultWindowPinned, let pinnedResultWindowTopLeft {
             frame = ResultWindowLayout.frame(preserving: pinnedResultWindowTopLeft, size: size, visibleFrame: visible)
@@ -1541,9 +1564,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
 
     private func resizeResultWindowToFit() {
-        guard let panel = resultWindow, panel.isVisible else { return }
-        let visible = resultWindowVisibleFrame(at: resultWindowAnchor ?? NSEvent.mouseLocation)
-        let size = desiredResultWindowSize(in: visible)
+        guard let panel = resultWindow, panel.isVisible, !panel.inLiveResize else { return }
+        let visible = resultWindowVisibleFrame(at: resultWindowAnchor ?? NSEvent.mouseLocation, preferCurrentWindow: true)
+        let size = desiredResultWindowSize(on: panel, in: visible)
         let topLeft = isResultWindowPinned
             ? (pinnedResultWindowTopLeft ?? NSPoint(x: panel.frame.minX, y: panel.frame.maxY))
             : NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
@@ -1551,9 +1574,9 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         setResultWindowFrame(frame, on: panel)
     }
 
-    private func resultWindowVisibleFrame(at location: NSPoint) -> NSRect {
+    private func resultWindowVisibleFrame(at location: NSPoint, preferCurrentWindow: Bool = false) -> NSRect {
         let screens = NSScreen.screens
-        let referenceFrame = isResultWindowPinned
+        let referenceFrame = isResultWindowPinned || preferCurrentWindow
             ? resultWindow?.frame ?? NSRect(origin: location, size: NSSize(width: 1, height: 1))
             : NSRect(origin: location, size: NSSize(width: 1, height: 1))
         if let index = ResultWindowLayout.screenIndex(for: referenceFrame, in: screens.map(\.frame)) {
@@ -1563,6 +1586,8 @@ final class GlobalTranslationController: NSObject, ObservableObject {
     }
 
     private func setResultWindowFrame(_ frame: NSRect, on panel: NSPanel) {
+        guard abs(frame.width - panel.frame.width) > 0.5 || abs(frame.height - panel.frame.height) > 0.5
+                || abs(frame.minX - panel.frame.minX) > 0.5 || abs(frame.minY - panel.frame.minY) > 0.5 else { return }
         // Nonanimated updates keep didMove synchronous, so only a user's drag
         // replaces the pinned anchor. Content growth must not move that anchor.
         isUpdatingResultWindowFrame = true
@@ -1570,54 +1595,57 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         panel.setFrame(frame, display: true)
     }
 
-    private func desiredResultWindowSize(in visibleFrame: NSRect) -> NSSize {
-        guard let viewModel else { return NSSize(width: 420, height: 180) }
-        var texts = viewModel.comparisonResults.compactMap { $0.translatedText ?? $0.errorMessage }
-        if showSelectionOriginalText { texts.insert(viewModel.sourceText, at: 0) }
-        let font = NSFont.systemFont(ofSize: viewModel.resultFontSize)
-        let longestLineWidth = texts
-            .flatMap { $0.components(separatedBy: .newlines) }
-            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
-            .max() ?? 280
-        let width = min(max(longestLineWidth + 88, 390), 560, max(visibleFrame.width - 16, 1))
-        let textWidth = max(width - 56, 1)
-        let sourceHeight = showSelectionOriginalText
-            ? min(measuredTextHeight(viewModel.sourceText, width: textWidth, font: .systemFont(ofSize: 11)), 160) + 21
-            : 0
-        let resultsHeight = viewModel.comparisonResults.reduce(CGFloat.zero) { total, result in
-            let contentHeight: CGFloat
-            if result.isLoading {
-                contentHeight = 20
-            } else {
-                let content = result.translatedText ?? result.errorMessage ?? ""
-                contentHeight = measuredTextHeight(content, width: max(textWidth - 24, 1), font: font)
-            }
-            let noticeHeight = result.notice.map {
-                measuredTextHeight($0, width: max(textWidth - 24, 1), font: .systemFont(ofSize: 11)) + 8
-            } ?? 0
-            return total + 54 + max(contentHeight, 18) + noticeHeight
+    fileprivate func updateResultContentMeasurement(_ measurement: ResultContentMeasurement) {
+        guard let contentSize = measurement.contentSize, let headerHeight = measurement.headerHeight,
+              contentSize.width.isFinite, contentSize.height.isFinite, headerHeight.isFinite,
+              contentSize.width > 0, contentSize.height >= 0 else { return }
+        resultContentMeasurement = measurement
+        guard !resultResizeScheduled else { return }
+        resultResizeScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.resultResizeScheduled = false
+            self.resizeResultWindowToFit()
         }
-        let gaps = CGFloat(max(viewModel.comparisonResults.count - 1, 0)) * 10
-        let naturalHeight = 70 + sourceHeight + resultsHeight + gaps
-        let screenLimit = visibleFrame.height * 0.72
-        return NSSize(width: width, height: min(max(naturalHeight, 155), screenLimit))
     }
 
-    private func measuredTextHeight(_ text: String, width: CGFloat, font: NSFont) -> CGFloat {
-        guard !text.isEmpty else { return 16 }
-        return ceil((text as NSString).boundingRect(
-            with: NSSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        ).height)
+    private func desiredResultWindowSize(on panel: NSPanel, in visibleFrame: NSRect) -> NSSize {
+        let currentContentSize = panel.contentRect(forFrameRect: panel.frame).size
+        let titleBarHeight = panel.frame.height - currentContentSize.height
+        let measured = resultContentMeasurement
+        let naturalHeight: CGFloat?
+        // Ignore a measurement made at the previous width while live-resizing.
+        // The next layout pass supplies the correct wrapped content height.
+        if let contentSize = measured.contentSize, let headerHeight = measured.headerHeight,
+           abs(contentSize.width - (currentContentSize.width - 48)) < 1 {
+            naturalHeight = ceil(contentSize.height + headerHeight + 44)
+        } else {
+            naturalHeight = nil
+        }
+        let contentSize = ResultWindowLayout.contentSize(
+            preferredWidth: resultPreferredContentWidth,
+            naturalHeight: naturalHeight,
+            userHeightLimit: resultUserHeightLimit,
+            currentHeight: currentContentSize.height,
+            isLoading: viewModel?.comparisonResults.contains(where: \.isLoading) ?? false,
+            availableSize: ResultWindowLayout.availableContentSize(
+                in: visibleFrame,
+                titleBarHeight: titleBarHeight,
+                pinnedTopLeft: isResultWindowPinned ? pinnedResultWindowTopLeft : nil
+            )
+        )
+        return panel.frameRect(forContentRect: NSRect(origin: .zero, size: contentSize)).size
     }
 
     private func selectedText() -> String? {
         if NSApp.isActive,
            let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
            textView.selectedRange().length > 0 {
-            let value = textView.string as NSString
-            return value.substring(with: textView.selectedRange())
+            let range = textView.selectedRange()
+            if let storage = textView.textStorage, NSMaxRange(range) <= storage.length {
+                return SelectedTextContent.formatted(storage.attributedSubstring(from: range))
+            }
+            return SelectedTextContent.plain((textView.string as NSString).substring(with: range))
         }
 
         let systemWide = AXUIElementCreateSystemWide()
@@ -1639,7 +1667,36 @@ final class GlobalTranslationController: NSObject, ObservableObject {
               !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        return selected
+        // Request exactly the selected range. AX attributed text preserves
+        // math superscripts and font traits that AXSelectedText cannot carry.
+        var rangeValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
+           let rangeValue,
+           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
+            var range = CFRange()
+            let axRange = unsafeDowncast(rangeValue, to: AXValue.self)
+            if AXValueGetValue(axRange, .cfRange, &range), range.location >= 0, range.length > 0 {
+                var attributedValue: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(
+                    element, kAXAttributedStringForRangeParameterizedAttribute as CFString,
+                    axRange, &attributedValue
+                ) == .success,
+                   let attributed = attributedValue as? NSAttributedString,
+                   SelectedTextContent.matches(attributed.string, selected) {
+                    return SelectedTextContent.formatted(attributed)
+                }
+                var rtfValue: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(
+                    element, kAXRTFForRangeParameterizedAttribute as CFString,
+                    axRange, &rtfValue
+                ) == .success,
+                   let data = rtfValue as? Data,
+                   let formatted = SelectedTextContent.fromRTF(data, matching: selected) {
+                    return formatted
+                }
+            }
+        }
+        return SelectedTextContent.plain(selected)
     }
 
     private func selectedTextWithClipboardFallback(allowClipboardFallback: Bool = true) async -> String? {
@@ -1671,10 +1728,18 @@ final class GlobalTranslationController: NSObject, ObservableObject {
         for _ in 0..<8 where pasteboard.changeCount == previousChangeCount {
             try? await Task.sleep(nanoseconds: 40_000_000)
         }
-        let copiedText = pasteboard.changeCount != previousChangeCount
-            ? pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            : nil
-        restorePasteboard(savedItems, to: pasteboard)
+        let copiedText: String?
+        if pasteboard.changeCount != previousChangeCount {
+            let plainText = pasteboard.string(forType: .string)
+            let formatted = pasteboard.data(forType: .rtf).flatMap {
+                SelectedTextContent.fromRTF($0, matching: plainText)
+            }
+            copiedText = (formatted ?? plainText.map(SelectedTextContent.plain))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            restorePasteboard(savedItems, to: pasteboard)
+        } else {
+            copiedText = nil
+        }
         if let copiedText, !copiedText.isEmpty {
             logger.debug("selectedText used clipboard fallback for pid=\(application.processIdentifier, privacy: .public)")
             return copiedText
@@ -1922,6 +1987,83 @@ extension GlobalTranslationController: NSWindowDelegate {
               !isUpdatingResultWindowFrame else { return }
         pinnedResultWindowTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
     }
+
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel, panel === resultWindow else { return }
+        resultLiveResizeStartSize = panel.contentRect(forFrameRect: panel.frame).size
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel, panel === resultWindow,
+              !isUpdatingResultWindowFrame, panel.inLiveResize else { return }
+        resultPreferredContentWidth = panel.contentRect(forFrameRect: panel.frame).width
+        if isResultWindowPinned {
+            pinnedResultWindowTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+        }
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel, panel === resultWindow else { return }
+        let size = panel.contentRect(forFrameRect: panel.frame).size
+        resultPreferredContentWidth = size.width
+        UserDefaults.standard.set(size.width, forKey: "selectionResultContentWidth")
+        if let initial = resultLiveResizeStartSize, abs(initial.height - size.height) > 1 {
+            resultUserHeightLimit = size.height
+            UserDefaults.standard.set(size.height, forKey: "selectionResultHeightLimit")
+        }
+        resultLiveResizeStartSize = nil
+        if isResultWindowPinned {
+            pinnedResultWindowTopLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+        }
+        resizeResultWindowToFit()
+    }
+}
+
+struct ResultContentMeasurement: Equatable, Sendable {
+    var contentSize: CGSize?
+    var headerHeight: CGFloat?
+    var isLoading = false
+}
+
+struct ResultContentMeasurementKey: PreferenceKey {
+    static let defaultValue = ResultContentMeasurement()
+
+    static func reduce(value: inout ResultContentMeasurement, nextValue: () -> ResultContentMeasurement) {
+        let next = nextValue()
+        if let size = next.contentSize { value.contentSize = size }
+        if let height = next.headerHeight { value.headerHeight = height }
+        value.isLoading = value.isLoading || next.isLoading
+    }
+}
+
+/// An eager, width-constrained document inside an independently sized viewport.
+/// Keeping this separate also allows checking the real SwiftUI/AppKit layout
+/// without making any translation requests.
+struct ResultDocumentScrollView<Content: View>: View {
+    let isLoading: Bool
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        GeometryReader { viewport in
+            ScrollView(.vertical) {
+                content
+                    // Reserve a constant scrollbar gutter even when macOS
+                    // uses non-overlay scrollbars. Text always wraps here.
+                    .frame(width: max(viewport.size.width - 16, 1), alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 2)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: ResultContentMeasurementKey.self,
+                                value: ResultContentMeasurement(contentSize: geometry.size, isLoading: isLoading)
+                            )
+                        }
+                    }
+            }
+            .frame(width: viewport.size.width, height: viewport.size.height, alignment: .topLeading)
+        }
+    }
 }
 
 private struct SelectionTranslationView: View {
@@ -1946,9 +2088,17 @@ private struct SelectionTranslationView: View {
                 .foregroundStyle(controller.isResultWindowPinned ? Color.accentColor : Color.secondary)
                 .help(controller.isResultWindowPinned ? "取消钉住；下次翻译跟随鼠标，失焦后自动隐藏" : "钉住窗口位置；可拖动到其他位置")
             }
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: ResultContentMeasurementKey.self,
+                        value: ResultContentMeasurement(headerHeight: geometry.size.height)
+                    )
+                }
+            }
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+            ResultDocumentScrollView(isLoading: viewModel.comparisonResults.contains(where: \.isLoading)) {
+                VStack(alignment: .leading, spacing: 10) {
                     if controller.showSelectionOriginalText {
                         HStack(alignment: .top, spacing: 10) {
                             Text(viewModel.sourceText)
@@ -1997,12 +2147,11 @@ private struct SelectionTranslationView: View {
                                 Label(error, systemImage: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.red)
                                     .font(.caption)
+                                    .fixedSize(horizontal: false, vertical: true)
                             } else if let text = result.translatedText {
-                                Text(text)
-                                    .font(.system(size: viewModel.resultFontSize))
+                                FormattedTranslationText(text: text, fontSize: viewModel.resultFontSize)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
                             }
                             if let notice = result.notice {
                                 Text(notice)
@@ -2039,6 +2188,9 @@ private struct SelectionTranslationView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onPreferenceChange(ResultContentMeasurementKey.self) { measurement in
+            controller.updateResultContentMeasurement(measurement)
+        }
         .overlay(alignment: .topLeading) {
             AppleTranslationBridgeHost(service: viewModel.appleService)
         }

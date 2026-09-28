@@ -36,14 +36,22 @@ final class AppleTranslationService {
     }
 
     func translate(text: String, source: LanguageOption, target: LanguageOption) async throws -> String {
+        let input = ProtectedTranslationInput(text: text)
+        guard input.hasTranslatableText else { return input.originalText }
+        let output = try await translatePrepared(text: input.text, languageDetectionText: text, source: source, target: target)
+        return try input.restore(in: output)
+    }
+
+    private func translatePrepared(text: String, languageDetectionText: String, source: LanguageOption, target: LanguageOption) async throws -> String {
         guard #available(macOS 15.0, *) else { throw ServiceError.systemTooOld }
-        var sourceLanguage = try resolvedSourceLanguage(source, text: text)
+        // Detect the source from the actual selection, not from opaque formula tokens.
+        var sourceLanguage = try resolvedSourceLanguage(source, text: languageDetectionText)
         guard let targetLanguage = target.localeLanguage else { throw ServiceError.unsupportedPair }
 
         var status = await LanguageAvailability().status(from: sourceLanguage, to: targetLanguage)
         if source == .auto,
            status != .installed,
-           shouldFallbackToInstalledEnglish(text),
+           shouldFallbackToInstalledEnglish(languageDetectionText),
            sourceLanguage.languageCode?.identifier.lowercased() != "en" {
             let english = Locale.Language(identifier: "en")
             let englishStatus = await LanguageAvailability().status(from: english, to: targetLanguage)
